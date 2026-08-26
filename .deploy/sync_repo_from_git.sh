@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 
 case "${1:-}" in
     --version|-v)
@@ -341,6 +341,35 @@ fetch_repository() {
     git -c pack.threads=1 -c pack.windowMemory=32m "$@" fetch --prune "${REMOTE}"
 }
 
+show_sync_status() {
+    local current_branch local_commit remote_commit ahead behind changes
+
+    current_branch="$(git symbolic-ref --quiet --short HEAD || echo "не определена")"
+    local_commit="$(git rev-parse --short HEAD 2>/dev/null || echo "нет коммитов")"
+    remote_commit="$(git rev-parse --short "refs/remotes/${REMOTE}/${BRANCH}" 2>/dev/null || echo "нет данных")"
+    changes="$(git status --short 2>/dev/null || true)"
+
+    echo
+    echo "Статус синхронизации"
+    echo "  Локальная ветка:    ${current_branch}"
+    echo "  Локальный коммит:   ${local_commit}"
+    echo "  Remote-коммит:      ${remote_commit}"
+
+    if [[ "${local_commit}" != "нет коммитов" ]] && [[ "${remote_commit}" != "нет данных" ]]; then
+        read -r ahead behind < <(git rev-list --left-right --count "HEAD...refs/remotes/${REMOTE}/${BRANCH}" 2>/dev/null || echo "0 0")
+        echo "  Впереди локально:   ${ahead} коммит(ов)"
+        echo "  Позади локально:    ${behind} коммит(ов)"
+    fi
+
+    if [[ -n "${changes}" ]]; then
+        echo "  Локальные изменения: есть"
+        printf '%s\n' "${changes}"
+    else
+        echo "  Локальные изменения: нет"
+    fi
+    echo
+}
+
 cd "${REPO_DIR}"
 
 if ! command -v git >/dev/null 2>&1; then
@@ -492,20 +521,25 @@ echo
 while true; do
     echo
     echo "1) Да, обновить"
-    echo "2) Отменить"
-    printf "Выберите пункт [2]: "
+    echo "2) Статус синхронизации"
+    echo "3) Отмена"
+    printf "Выберите пункт [3]: "
     IFS= read -rsn1 CONFIRM
     printf '\n'
     case "${CONFIRM}" in
         1)
             break
             ;;
-        2|"")
+        2)
+            show_sync_status
+            read -r -p "Нажмите Enter для возврата в меню... "
+            ;;
+        3|"")
             echo "Отменено."
             exit 0
             ;;
         *)
-            echo "Ошибка: введите 1 или 2."
+            echo "Ошибка: введите 1, 2 или 3."
             ;;
     esac
 done
