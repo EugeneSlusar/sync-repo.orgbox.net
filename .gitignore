@@ -1,0 +1,3 @@
+.deploy/sync_repo_from_git.conf
+.deploy/sync_repo_deploy_key
+.deploy/sync_repo_deploy_key.pub
