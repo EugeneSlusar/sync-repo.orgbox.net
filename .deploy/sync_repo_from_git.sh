@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.5"
+SCRIPT_VERSION="1.3.6"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -481,29 +481,26 @@ WORKFLOW
     if [[ "${existing_actions_key}" == false ]]; then
         echo
         echo "Шаг 1. Создайте в GitHub → Settings → Secrets and variables → Actions"
-        echo "следующие Repository secrets:"
-        echo "DEPLOY_HOST=${deploy_host}"
-        echo "DEPLOY_PORT=${deploy_port}"
-        echo "DEPLOY_USER=${deploy_user}"
-        echo "DEPLOY_PATH=${deploy_path}"
-        printf '\033[31m%s\033[0m\n' "DEPLOY_SSH_KEY: загрузить только как GitHub Secret, не в репозиторий"
-        echo "----- BEGIN DEPLOY_SSH_KEY -----"
+        echo "Для каждого секрета укажите имя, а значением вставьте только жёлтый блок."
+        echo ""
+        printf 'DEPLOY_HOST\n\033[1;33m%s\033[0m\n\n' "${deploy_host}"
+        printf 'DEPLOY_PORT\n\033[1;33m%s\033[0m\n\n' "${deploy_port}"
+        printf 'DEPLOY_USER\n\033[1;33m%s\033[0m\n\n' "${deploy_user}"
+        printf 'DEPLOY_PATH\n\033[1;33m%s\033[0m\n\n' "${deploy_path}"
+        printf '\033[31mDEPLOY_SSH_KEY — КОПИРУЙТЕ ТОЛЬКО ЖЁЛТЫЙ БЛОК\033[0m\n'
+        printf '\033[1;33m'
         cat "${actions_key}"
-        echo "----- END DEPLOY_SSH_KEY -----"
-        echo "DEPLOY_KNOWN_HOSTS (скопируйте весь блок ниже)"
-        echo "----- BEGIN DEPLOY_KNOWN_HOSTS -----"
-        printf '%s\n' "${known_hosts}"
-        echo "----- END DEPLOY_KNOWN_HOSTS -----"
+        printf '\033[0m\n\n'
+        printf '\033[31mDEPLOY_KNOWN_HOSTS — КОПИРУЙТЕ ТОЛЬКО ЖЁЛТЫЙ БЛОК\033[0m\n'
+        printf '\033[1;33m%s\033[0m\n' "${known_hosts}"
     else
         echo "Шаг 1. Существующий Actions SSH-ключ сохранён — прежние secrets можно использовать."
         echo "DEPLOY_HOST=${deploy_host}"
         echo "DEPLOY_PORT=${deploy_port}"
         echo "DEPLOY_USER=${deploy_user}"
         echo "DEPLOY_PATH=${deploy_path}"
-        echo "DEPLOY_KNOWN_HOSTS (скопируйте весь блок ниже при необходимости)"
-        echo "----- BEGIN DEPLOY_KNOWN_HOSTS -----"
-        printf '%s\n' "${known_hosts}"
-        echo "----- END DEPLOY_KNOWN_HOSTS -----"
+        printf '\033[31mDEPLOY_KNOWN_HOSTS — КОПИРУЙТЕ ТОЛЬКО ЖЁЛТЫЙ БЛОК\033[0m\n'
+        printf '\033[1;33m%s\033[0m\n' "${known_hosts}"
         echo "DEPLOY_SSH_KEY повторно показать нельзя: приватная часть старого ключа удалена после создания."
         echo "Для получения нового DEPLOY_SSH_KEY выберите пункт 2 при следующем запуске мастера."
     fi
