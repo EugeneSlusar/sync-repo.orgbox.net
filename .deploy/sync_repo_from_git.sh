@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -112,7 +112,8 @@ ensure_local_files_are_excluded() {
     for protected_file in \
         "${CONFIG_FILE}" \
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key" \
-        "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key.pub"; do
+        "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key.pub" \
+        "${PROJECT_CONFIG_DIR}/github_actions_deploy_key.pub"; do
         relative_path="${protected_file#"${REPO_DIR}/"}"
         exclude_pattern="/${relative_path}"
         if ! grep -Fqx -- "${exclude_pattern}" "${exclude_file}"; then
@@ -333,7 +334,7 @@ create_github_repository() {
 
 setup_actions_autodeploy() {
     local deploy_host deploy_port deploy_user deploy_path workflow_file
-    local actions_key actions_public known_hosts ssh_result
+    local actions_key actions_public known_hosts ssh_result existing_actions_key
 
     if ! command -v ssh-keygen >/dev/null 2>&1 || ! command -v ssh-keyscan >/dev/null 2>&1; then
         echo "Ошибка: для настройки GitHub Actions нужны ssh-keygen и ssh-keyscan." >&2
@@ -356,17 +357,25 @@ setup_actions_autodeploy() {
         exit 1
     fi
 
-    ACTIONS_PRIVATE_KEY_TEMP="$(mktemp "${TMPDIR:-/tmp}/github-actions-key.XXXXXX")"
-    rm -f -- "${ACTIONS_PRIVATE_KEY_TEMP}"
-    actions_key="${ACTIONS_PRIVATE_KEY_TEMP}"
-    ssh-keygen -q -t ed25519 -C "github-actions:${deploy_host}:${REPO_DIR}" -f "${actions_key}" -N ""
-    actions_public="${actions_key}.pub"
+    actions_public="${PROJECT_CONFIG_DIR}/github_actions_deploy_key.pub"
+    existing_actions_key=false
+    if [[ -f "${actions_public}" ]]; then
+        existing_actions_key=true
+        echo "Найден существующий Actions SSH-ключ — новый ключ создаваться не будет."
+    else
+        ACTIONS_PRIVATE_KEY_TEMP="$(mktemp "${TMPDIR:-/tmp}/github-actions-key.XXXXXX")"
+        rm -f -- "${ACTIONS_PRIVATE_KEY_TEMP}"
+        actions_key="${ACTIONS_PRIVATE_KEY_TEMP}"
+        ssh-keygen -q -t ed25519 -C "github-actions:${deploy_host}:${REPO_DIR}" -f "${actions_key}" -N ""
+        cp -- "${actions_key}.pub" "${actions_public}"
+        chmod 644 "${actions_public}"
+    fi
 
     mkdir -p -- "${HOME}/.ssh"
     chmod 700 "${HOME}/.ssh"
     touch "${HOME}/.ssh/authorized_keys"
     chmod 600 "${HOME}/.ssh/authorized_keys"
-    if ! grep -Fq "github-actions:${deploy_host}:${REPO_DIR}" "${HOME}/.ssh/authorized_keys"; then
+    if ! grep -Fq "github-actions:" "${HOME}/.ssh/authorized_keys"; then
         cat "${actions_public}" >> "${HOME}/.ssh/authorized_keys"
     fi
 
@@ -375,8 +384,8 @@ setup_actions_autodeploy() {
         echo "Предупреждение: не удалось получить SSH fingerprint для ${deploy_host}." >&2
     fi
 
-    ssh_result="не проверено"
-    if ssh -i "${actions_key}" -p "${deploy_port}" \
+    ssh_result="ключ уже настроен"
+    if [[ "${existing_actions_key}" == false ]] && ssh -i "${actions_key}" -p "${deploy_port}" \
         -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
         "${deploy_user}@${deploy_host}" "printf connected" >/dev/null 2>&1; then
         ssh_result="подключение успешно"
@@ -456,28 +465,36 @@ jobs:
 WORKFLOW
 
     echo
+    echo "============================================================"
     echo "Автодеплой подготовлен. Результат SSH: ${ssh_result}."
     echo "Создан файл: ${workflow_file}"
+    if [[ "${existing_actions_key}" == false ]]; then
+        echo
+        echo "Шаг 1. Создайте в GitHub → Settings → Secrets and variables → Actions"
+        echo "следующие Repository secrets:"
+        echo "DEPLOY_HOST=${deploy_host}"
+        echo "DEPLOY_PORT=${deploy_port}"
+        echo "DEPLOY_USER=${deploy_user}"
+        echo "DEPLOY_PATH=${deploy_path}"
+        echo "DEPLOY_SSH_KEY (скопируйте весь блок ниже)"
+        echo "----- BEGIN DEPLOY_SSH_KEY -----"
+        cat "${actions_key}"
+        echo "----- END DEPLOY_SSH_KEY -----"
+        echo "DEPLOY_KNOWN_HOSTS (скопируйте весь блок ниже)"
+        echo "----- BEGIN DEPLOY_KNOWN_HOSTS -----"
+        printf '%s\n' "${known_hosts}"
+        echo "----- END DEPLOY_KNOWN_HOSTS -----"
+    else
+        echo "Шаг 1. Существующий Actions SSH-ключ сохранён — прежние secrets можно использовать."
+    fi
     echo
-    echo "Создайте в GitHub → Settings → Secrets and variables → Actions"
-    echo "следующие Repository secrets:"
-    echo ""
-    echo "DEPLOY_HOST=${deploy_host}"
-    echo "DEPLOY_PORT=${deploy_port}"
-    echo "DEPLOY_USER=${deploy_user}"
-    echo "DEPLOY_PATH=${deploy_path}"
-    echo "DEPLOY_SSH_KEY (содержимое ниже до строки END OPENSSH PRIVATE KEY)"
-    echo "----- BEGIN DEPLOY_SSH_KEY -----"
-    cat "${actions_key}"
-    echo "----- END DEPLOY_SSH_KEY -----"
-    echo "DEPLOY_KNOWN_HOSTS (содержимое ниже)"
-    echo "----- BEGIN DEPLOY_KNOWN_HOSTS -----"
-    printf '%s\n' "${known_hosts}"
-    echo "----- END DEPLOY_KNOWN_HOSTS -----"
-    echo
-    echo "После добавления secrets отправьте файл .github/workflows/deploy.yml в GitHub."
-    rm -f -- "${actions_key}" "${actions_public}"
-    ACTIONS_PRIVATE_KEY_TEMP=""
+    echo "Шаг 2. Обязательно отправьте файл .github/workflows/deploy.yml в GitHub."
+    echo "Без этого GitHub Actions не запустится."
+    echo "============================================================"
+    if [[ "${existing_actions_key}" == false ]]; then
+        rm -f -- "${actions_key}"
+        ACTIONS_PRIVATE_KEY_TEMP=""
+    fi
     read -r -p "Нажмите Enter для возврата в меню... "
 }
 
