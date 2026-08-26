@@ -2,6 +2,15 @@
 
 set -Eeuo pipefail
 
+SCRIPT_VERSION="1.1.0"
+
+case "${1:-}" in
+    --version|-v)
+        echo "sync_repo_from_git.sh ${SCRIPT_VERSION}"
+        exit 0
+        ;;
+esac
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_FILE="${SCRIPT_DIR}/$(basename -- "${BASH_SOURCE[0]}")"
 if [[ -n "${GIT_REPO_DIR:-}" ]]; then
@@ -463,6 +472,7 @@ printf '│ %s │ %-90s │\n' "Источник     " "${REPOSITORY_URL}"
 printf '│ %s │ %-90s │\n' "Ветка        " "${BRANCH}"
 printf '│ %s │ %-90s │\n' "Авторизация  " "${AUTH_DESCRIPTION}"
 printf '│ %s │ %-90s │\n' "Конфигурация " "${CONFIG_FILE}"
+printf '│ %s │ %-90s │\n' "Версия       " "${SCRIPT_VERSION}"
 printf '└%s┴%s┘\n' "${TABLE_LABEL_RULE}" "${TABLE_VALUE_RULE}"
 if [[ "${GIT_IS_CONFIGURED}" == true ]]; then
     echo "Git:          уже настроен"
