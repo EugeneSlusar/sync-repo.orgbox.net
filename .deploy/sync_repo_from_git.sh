@@ -2,12 +2,16 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
+AUTO_MODE=false
 
 case "${1:-}" in
     --version|-v)
         echo "sync_repo_from_git.sh ${SCRIPT_VERSION}"
         exit 0
+        ;;
+    --auto)
+        AUTO_MODE=true
         ;;
 esac
 
@@ -37,6 +41,7 @@ SSH_PRIVATE_KEY=""
 SSH_PRIVATE_KEY_PATH=""
 ASKPASS_FILE=""
 UPDATE_TEMP_FILE=""
+ACTIONS_PRIVATE_KEY_TEMP=""
 TOOL_REPOSITORY_URL="${SYNC_REPO_TOOL_REPOSITORY:-https://github.com/EugeneSlusar/sync-repo.orgbox.net.git}"
 TOOL_REPOSITORY_REF="${SYNC_REPO_TOOL_REF:-main}"
 
@@ -46,6 +51,9 @@ cleanup() {
     fi
     if [[ -n "${UPDATE_TEMP_FILE}" ]] && [[ -f "${UPDATE_TEMP_FILE}" ]]; then
         rm -f -- "${UPDATE_TEMP_FILE}"
+    fi
+    if [[ -n "${ACTIONS_PRIVATE_KEY_TEMP}" ]] && [[ -f "${ACTIONS_PRIVATE_KEY_TEMP}" ]]; then
+        rm -f -- "${ACTIONS_PRIVATE_KEY_TEMP}" "${ACTIONS_PRIVATE_KEY_TEMP}.pub"
     fi
 }
 
@@ -323,6 +331,156 @@ create_github_repository() {
     echo "GitHub-репозиторий подключён: ${REPOSITORY_URL}"
 }
 
+setup_actions_autodeploy() {
+    local deploy_host deploy_port deploy_user deploy_path workflow_file
+    local actions_key actions_public known_hosts ssh_result
+
+    if ! command -v ssh-keygen >/dev/null 2>&1 || ! command -v ssh-keyscan >/dev/null 2>&1; then
+        echo "Ошибка: для настройки GitHub Actions нужны ssh-keygen и ssh-keyscan." >&2
+        exit 1
+    fi
+
+    echo
+    echo "Настройка автодеплоя через GitHub Actions → SSH"
+    read -r -p "SSH-хост [$(hostname -f 2>/dev/null || hostname)]: " deploy_host
+    deploy_host="${deploy_host:-$(hostname -f 2>/dev/null || hostname)}"
+    read -r -p "SSH-порт [22]: " deploy_port
+    deploy_port="${deploy_port:-22}"
+    read -r -p "SSH-пользователь [${USER:-$(whoami)}]: " deploy_user
+    deploy_user="${deploy_user:-${USER:-$(whoami)}}"
+    read -r -p "Путь проекта [${REPO_DIR}]: " deploy_path
+    deploy_path="${deploy_path:-${REPO_DIR}}"
+
+    if [[ ! "${deploy_port}" =~ ^[0-9]+$ ]]; then
+        echo "Ошибка: SSH-порт должен быть числом." >&2
+        exit 1
+    fi
+
+    ACTIONS_PRIVATE_KEY_TEMP="$(mktemp "${TMPDIR:-/tmp}/github-actions-key.XXXXXX")"
+    rm -f -- "${ACTIONS_PRIVATE_KEY_TEMP}"
+    actions_key="${ACTIONS_PRIVATE_KEY_TEMP}"
+    ssh-keygen -q -t ed25519 -C "github-actions:${deploy_host}:${REPO_DIR}" -f "${actions_key}" -N ""
+    actions_public="${actions_key}.pub"
+
+    mkdir -p -- "${HOME}/.ssh"
+    chmod 700 "${HOME}/.ssh"
+    touch "${HOME}/.ssh/authorized_keys"
+    chmod 600 "${HOME}/.ssh/authorized_keys"
+    if ! grep -Fq "github-actions:${deploy_host}:${REPO_DIR}" "${HOME}/.ssh/authorized_keys"; then
+        cat "${actions_public}" >> "${HOME}/.ssh/authorized_keys"
+    fi
+
+    known_hosts="$(ssh-keyscan -p "${deploy_port}" -T 10 "${deploy_host}" 2>/dev/null || true)"
+    if [[ -z "${known_hosts}" ]]; then
+        echo "Предупреждение: не удалось получить SSH fingerprint для ${deploy_host}." >&2
+    fi
+
+    ssh_result="не проверено"
+    if ssh -i "${actions_key}" -p "${deploy_port}" \
+        -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+        "${deploy_user}@${deploy_host}" "printf connected" >/dev/null 2>&1; then
+        ssh_result="подключение успешно"
+    else
+        ssh_result="проверка не пройдена; ключ добавлен в authorized_keys"
+    fi
+
+    workflow_file="${REPO_DIR}/.github/workflows/deploy.yml"
+    mkdir -p -- "$(dirname -- "${workflow_file}")"
+    cat > "${workflow_file}" <<'WORKFLOW'
+name: Deploy to server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate deployment secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variable in DEPLOY_HOST DEPLOY_USER DEPLOY_PATH DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            if [[ -z "${!variable}" ]]; then
+              echo "Missing GitHub Secret: ${variable}" >&2
+              exit 1
+            fi
+          done
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 644 "$HOME/.ssh/known_hosts"
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+
+      - name: Deploy project
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/deploy_key" \
+            -p "${DEPLOY_PORT:-22}" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "cd '${DEPLOY_PATH}' && bash .deploy/sync_repo_from_git.sh --auto"
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+WORKFLOW
+
+    echo
+    echo "Автодеплой подготовлен. Результат SSH: ${ssh_result}."
+    echo "Создан файл: ${workflow_file}"
+    echo
+    echo "Создайте в GitHub → Settings → Secrets and variables → Actions"
+    echo "следующие Repository secrets:"
+    echo ""
+    echo "DEPLOY_HOST=${deploy_host}"
+    echo "DEPLOY_PORT=${deploy_port}"
+    echo "DEPLOY_USER=${deploy_user}"
+    echo "DEPLOY_PATH=${deploy_path}"
+    echo "DEPLOY_SSH_KEY (содержимое ниже до строки END OPENSSH PRIVATE KEY)"
+    echo "----- BEGIN DEPLOY_SSH_KEY -----"
+    cat "${actions_key}"
+    echo "----- END DEPLOY_SSH_KEY -----"
+    echo "DEPLOY_KNOWN_HOSTS (содержимое ниже)"
+    echo "----- BEGIN DEPLOY_KNOWN_HOSTS -----"
+    printf '%s\n' "${known_hosts}"
+    echo "----- END DEPLOY_KNOWN_HOSTS -----"
+    echo
+    echo "После добавления secrets отправьте файл .github/workflows/deploy.yml в GitHub."
+    rm -f -- "${actions_key}" "${actions_public}"
+    ACTIONS_PRIVATE_KEY_TEMP=""
+    read -r -p "Нажмите Enter для возврата в меню... "
+}
+
 prepare_askpass() {
     ASKPASS_FILE="$(mktemp "${TMPDIR:-/tmp}/sync-repo-askpass.XXXXXX")"
     {
@@ -389,13 +547,21 @@ if [[ -z "${REMOTE}" ]]; then
     REMOTE="${GIT_REMOTE:-origin}"
 fi
 
+if [[ "${AUTO_MODE}" == true ]]; then
+    if [[ -z "${REPOSITORY_URL}" ]] || [[ -z "${BRANCH}" ]] || ! auth_config_is_valid; then
+        echo "Ошибка: для режима --auto отсутствуют или неверны настройки репозитория." >&2
+        echo "Сначала выполните обычную настройку sync_repo_from_git.sh." >&2
+        exit 1
+    fi
+fi
+
 LOCAL_REMOTE_CONFIGURED=false
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
     && git remote get-url "${REMOTE}" >/dev/null 2>&1; then
     LOCAL_REMOTE_CONFIGURED=true
 fi
 
-if [[ -z "${REPOSITORY_URL}" ]] && [[ "${LOCAL_REMOTE_CONFIGURED}" == false ]]; then
+if [[ -z "${REPOSITORY_URL}" ]] && [[ "${LOCAL_REMOTE_CONFIGURED}" == false ]] && [[ "${AUTO_MODE}" == false ]]; then
     echo
     echo "Проект ещё не подключён к удалённому Git-репозиторию."
     echo "1) Подключить существующий репозиторий"
@@ -414,6 +580,10 @@ if [[ -n "${GIT_REMOTE:-}" ]]; then
     REMOTE="${GIT_REMOTE}"
 fi
 if [[ -z "${REMOTE}" ]]; then
+    if [[ "${AUTO_MODE}" == true ]]; then
+        echo "Ошибка: в режиме --auto не настроено имя Git remote." >&2
+        exit 1
+    fi
     echo
     echo "Имя Git remote — короткое локальное имя подключения Git, а не URL."
     echo "Обычно используется значение origin. Если вы случайно вставите URL сюда,"
@@ -443,6 +613,10 @@ if [[ -n "${GIT_REPOSITORY_URL:-}" ]]; then
     REPOSITORY_URL="${GIT_REPOSITORY_URL}"
 fi
 if [[ -z "${REPOSITORY_URL}" ]]; then
+    if [[ "${AUTO_MODE}" == true ]]; then
+        echo "Ошибка: в режиме --auto не настроен URL Git-репозитория." >&2
+        exit 1
+    fi
     echo
     echo "URL Git-репозитория — адрес проекта на GitHub/GitLab или другом Git-сервере."
     echo "Примеры: https://github.com/user/project.git"
@@ -463,6 +637,10 @@ if [[ -n "${GIT_BRANCH:-}" ]]; then
     BRANCH="${GIT_BRANCH}"
 fi
 if [[ -z "${BRANCH}" ]]; then
+    if [[ "${AUTO_MODE}" == true ]]; then
+        echo "Ошибка: в режиме --auto не настроена ветка." >&2
+        exit 1
+    fi
     DEFAULT_BRANCH="${CURRENT_BRANCH:-main}"
     echo
     echo "Ветка — имя линии разработки, которую нужно копировать на сервер."
@@ -472,6 +650,10 @@ if [[ -z "${BRANCH}" ]]; then
 fi
 
 if ! auth_config_is_valid; then
+    if [[ "${AUTO_MODE}" == true ]]; then
+        echo "Ошибка: в режиме --auto не настроена авторизация." >&2
+        exit 1
+    fi
     request_auth
 fi
 
@@ -518,31 +700,37 @@ echo "Локальные изменения отслеживаемых файл�
 echo "Файлы из .gitignore (настройки, секреты и runtime-данные) останутся на месте."
 echo
 
-while true; do
-    echo
-    echo "1) Да, обновить"
-    echo "2) Статус синхронизации"
-    echo "3) Отмена"
-    printf "Выберите пункт [3]: "
-    IFS= read -rsn1 CONFIRM
-    printf '\n'
-    case "${CONFIRM}" in
-        1)
-            break
-            ;;
-        2)
-            show_sync_status
-            read -r -p "Нажмите Enter для возврата в меню... "
-            ;;
-        3|"")
-            echo "Отменено."
-            exit 0
-            ;;
-        *)
-            echo "Ошибка: введите 1, 2 или 3."
-            ;;
-    esac
-done
+if [[ "${AUTO_MODE}" == false ]]; then
+    while true; do
+        echo
+        echo "1) Да, обновить"
+        echo "2) Статус синхронизации"
+        echo "3) Настроить автодеплой через GitHub Actions"
+        echo "4) Отмена"
+        printf "Выберите пункт [4]: "
+        IFS= read -rsn1 CONFIRM
+        printf '\n'
+        case "${CONFIRM}" in
+            1)
+                break
+                ;;
+            2)
+                show_sync_status
+                read -r -p "Нажмите Enter для возврата в меню... "
+                ;;
+            3)
+                setup_actions_autodeploy
+                ;;
+            4|"")
+                echo "Отменено."
+                exit 0
+                ;;
+            *)
+                echo "Ошибка: введите 1, 2, 3 или 4."
+                ;;
+        esac
+    done
+fi
 
 if [[ "${GIT_IS_CONFIGURED}" == false ]]; then
     echo "Инициализация Git-репозитория..."
