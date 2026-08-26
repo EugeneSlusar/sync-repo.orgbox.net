@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.4"
+SCRIPT_VERSION="1.3.5"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -360,9 +360,16 @@ setup_actions_autodeploy() {
     actions_public="${PROJECT_CONFIG_DIR}/github_actions_deploy_key.pub"
     existing_actions_key=false
     if [[ -f "${actions_public}" ]]; then
-        existing_actions_key=true
-        echo "Найден существующий Actions SSH-ключ — новый ключ создаваться не будет."
-    else
+        echo "Найден существующий Actions SSH-ключ."
+        echo "1) Использовать существующий ключ"
+        echo "2) Создать новые ключи"
+        read -r -p "Выберите вариант [1]: " key_choice
+        if [[ "${key_choice}" != "2" ]]; then
+            existing_actions_key=true
+            echo "Будет использован существующий ключ."
+        fi
+    fi
+    if [[ "${existing_actions_key}" == false ]]; then
         ACTIONS_PRIVATE_KEY_TEMP="$(mktemp "${TMPDIR:-/tmp}/github-actions-key.XXXXXX")"
         rm -f -- "${ACTIONS_PRIVATE_KEY_TEMP}"
         actions_key="${ACTIONS_PRIVATE_KEY_TEMP}"
@@ -375,7 +382,7 @@ setup_actions_autodeploy() {
     chmod 700 "${HOME}/.ssh"
     touch "${HOME}/.ssh/authorized_keys"
     chmod 600 "${HOME}/.ssh/authorized_keys"
-    if ! grep -Fq "github-actions:" "${HOME}/.ssh/authorized_keys"; then
+    if [[ "${existing_actions_key}" == false ]] && ! grep -Fq "github-actions:${deploy_host}:${REPO_DIR}" "${HOME}/.ssh/authorized_keys"; then
         cat "${actions_public}" >> "${HOME}/.ssh/authorized_keys"
     fi
 
@@ -489,6 +496,16 @@ WORKFLOW
         echo "----- END DEPLOY_KNOWN_HOSTS -----"
     else
         echo "Шаг 1. Существующий Actions SSH-ключ сохранён — прежние secrets можно использовать."
+        echo "DEPLOY_HOST=${deploy_host}"
+        echo "DEPLOY_PORT=${deploy_port}"
+        echo "DEPLOY_USER=${deploy_user}"
+        echo "DEPLOY_PATH=${deploy_path}"
+        echo "DEPLOY_KNOWN_HOSTS (скопируйте весь блок ниже при необходимости)"
+        echo "----- BEGIN DEPLOY_KNOWN_HOSTS -----"
+        printf '%s\n' "${known_hosts}"
+        echo "----- END DEPLOY_KNOWN_HOSTS -----"
+        echo "DEPLOY_SSH_KEY повторно показать нельзя: приватная часть старого ключа удалена после создания."
+        echo "Для получения нового DEPLOY_SSH_KEY выберите пункт 2 при следующем запуске мастера."
     fi
     printf '\033[31m%s\033[0m\n' "Публичный ключ уже добавлен на сервер в ~/.ssh/authorized_keys."
     printf '\033[31m%s\033[0m\n' "Не загружайте ключи и sync_repo_from_git.conf в GitHub-репозиторий."
