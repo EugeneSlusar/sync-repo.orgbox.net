@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.3.2"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -488,8 +488,16 @@ WORKFLOW
         echo "Шаг 1. Существующий Actions SSH-ключ сохранён — прежние secrets можно использовать."
     fi
     echo
-    echo "Шаг 2. Обязательно отправьте файл .github/workflows/deploy.yml в GitHub."
-    echo "Без этого GitHub Actions не запустится."
+    echo "Шаг 2. Добавьте workflow в GitHub через веб-интерфейс:"
+    echo "  1. Откройте страницу репозитория на GitHub."
+    echo "  2. Нажмите Add file → Create new file."
+    echo "  3. В поле имени файла укажите .github/workflows/deploy.yml."
+    echo "  4. Вставьте текст workflow из блока ниже."
+    echo "  5. Нажмите Commit changes в ветку main."
+    echo ""
+    echo "----- BEGIN .github/workflows/deploy.yml -----"
+    cat "${workflow_file}"
+    echo "----- END .github/workflows/deploy.yml -----"
     echo "============================================================"
     if [[ "${existing_actions_key}" == false ]]; then
         rm -f -- "${actions_key}"

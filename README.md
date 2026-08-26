@@ -45,4 +45,6 @@ bash .deploy/sync_repo_from_git.sh --version
 
 Повторный запуск мастера не создаёт новый ключ, если Actions-ключ уже найден на сервере, поэтому существующие secrets можно использовать повторно.
 
+Мастер также выводит полный текст workflow и инструкцию для добавления файла через GitHub Web: `Add file` → `Create new file` → `.github/workflows/deploy.yml` → `Commit changes` в `main`.
+
 Если проект ещё не подключён к Git, мастер предлагает подключить существующий репозиторий или создать новый GitHub-репозиторий из текущей папки. Для создания нужен установленный и авторизованный [GitHub CLI](https://cli.github.com/): `gh auth login`.
