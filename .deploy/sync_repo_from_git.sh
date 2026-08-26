@@ -27,16 +27,61 @@ AUTH_SECRET=""
 SSH_PRIVATE_KEY=""
 SSH_PRIVATE_KEY_PATH=""
 ASKPASS_FILE=""
+UPDATE_TEMP_FILE=""
+TOOL_REPOSITORY_URL="${SYNC_REPO_TOOL_REPOSITORY:-https://github.com/EugeneSlusar/sync-repo.orgbox.net.git}"
+TOOL_REPOSITORY_REF="${SYNC_REPO_TOOL_REF:-main}"
 
 cleanup() {
     if [[ -n "${ASKPASS_FILE}" ]] && [[ -f "${ASKPASS_FILE}" ]]; then
         rm -f -- "${ASKPASS_FILE}"
+    fi
+    if [[ -n "${UPDATE_TEMP_FILE}" ]] && [[ -f "${UPDATE_TEMP_FILE}" ]]; then
+        rm -f -- "${UPDATE_TEMP_FILE}"
     fi
 }
 
 trap cleanup EXIT
 
 printf '\033[2J\033[H'
+
+is_tool_repository() {
+    local current_remote normalized_current normalized_tool
+
+    current_remote="$(git -C "${REPO_DIR}" remote get-url origin 2>/dev/null || true)"
+    normalized_current="${current_remote%.git}"
+    normalized_tool="${TOOL_REPOSITORY_URL%.git}"
+    [[ "${normalized_current}" == "${normalized_tool}" ]] \
+        || [[ "${normalized_current}" == "git@github.com:EugeneSlusar/sync-repo.orgbox.net" ]]
+}
+
+update_script_from_central_repository() {
+    local raw_url current_mode
+
+    [[ "${SYNC_REPO_AUTO_UPDATE:-1}" == "1" ]] || return 0
+    is_tool_repository && return 0
+    command -v curl >/dev/null 2>&1 || return 0
+
+    raw_url="https://raw.githubusercontent.com/EugeneSlusar/sync-repo.orgbox.net/${TOOL_REPOSITORY_REF}/.deploy/sync_repo_from_git.sh"
+    UPDATE_TEMP_FILE="$(mktemp "${TMPDIR:-/tmp}/sync-repo-script.XXXXXX")"
+    if ! curl -fsSL --connect-timeout 10 --max-time 30 "${raw_url}" -o "${UPDATE_TEMP_FILE}"; then
+        echo "Предупреждение: не удалось проверить обновление sync_repo_from_git.sh." >&2
+        return 0
+    fi
+
+    if ! cmp -s "${SCRIPT_FILE}" "${UPDATE_TEMP_FILE}"; then
+        current_mode="$(stat -c '%a' "${SCRIPT_FILE}" 2>/dev/null || true)"
+        mv -f -- "${UPDATE_TEMP_FILE}" "${SCRIPT_FILE}"
+        UPDATE_TEMP_FILE=""
+        if [[ -n "${current_mode}" ]]; then
+            chmod "${current_mode}" "${SCRIPT_FILE}" 2>/dev/null || chmod +x "${SCRIPT_FILE}"
+        else
+            chmod +x "${SCRIPT_FILE}"
+        fi
+        echo "Скрипт sync_repo_from_git.sh обновлён из центрального репозитория."
+    fi
+}
+
+update_script_from_central_repository
 
 ensure_local_files_are_excluded() {
     local exclude_file exclude_pattern protected_file relative_path
