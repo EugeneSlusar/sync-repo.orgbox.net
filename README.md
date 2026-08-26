@@ -47,4 +47,6 @@ bash .deploy/sync_repo_from_git.sh --version
 
 Мастер также выводит полный текст workflow и инструкцию для добавления файла через GitHub Web: `Add file` → `Create new file` → `.github/workflows/deploy.yml` → `Commit changes` в `main`.
 
+При настройке мастер красным предупреждает: SSH-ключи и `sync_repo_from_git.conf` нельзя добавлять в Git-репозиторий. Приватный Actions-ключ используется только как GitHub Secret.
+
 Если проект ещё не подключён к Git, мастер предлагает подключить существующий репозиторий или создать новый GitHub-репозиторий из текущей папки. Для создания нужен установленный и авторизованный [GitHub CLI](https://cli.github.com/): `gh auth login`.

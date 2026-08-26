@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.3"
+SCRIPT_VERSION="1.3.4"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -470,6 +470,7 @@ WORKFLOW
     echo "============================================================"
     echo "Автодеплой подготовлен. Результат SSH: ${ssh_result}."
     echo "Создан файл: ${workflow_file}"
+    printf '\033[31m%s\033[0m\n' "ВНИМАНИЕ: файлы SSH-ключей нельзя добавлять в Git-репозиторий."
     if [[ "${existing_actions_key}" == false ]]; then
         echo
         echo "Шаг 1. Создайте в GitHub → Settings → Secrets and variables → Actions"
@@ -478,7 +479,7 @@ WORKFLOW
         echo "DEPLOY_PORT=${deploy_port}"
         echo "DEPLOY_USER=${deploy_user}"
         echo "DEPLOY_PATH=${deploy_path}"
-        echo "DEPLOY_SSH_KEY (скопируйте весь блок ниже)"
+        printf '\033[31m%s\033[0m\n' "DEPLOY_SSH_KEY: загрузить только как GitHub Secret, не в репозиторий"
         echo "----- BEGIN DEPLOY_SSH_KEY -----"
         cat "${actions_key}"
         echo "----- END DEPLOY_SSH_KEY -----"
@@ -489,6 +490,8 @@ WORKFLOW
     else
         echo "Шаг 1. Существующий Actions SSH-ключ сохранён — прежние secrets можно использовать."
     fi
+    printf '\033[31m%s\033[0m\n' "Публичный ключ уже добавлен на сервер в ~/.ssh/authorized_keys."
+    printf '\033[31m%s\033[0m\n' "Не загружайте ключи и sync_repo_from_git.conf в GitHub-репозиторий."
     echo
     echo "Шаг 2. Добавьте workflow в GitHub через веб-интерфейс:"
     echo "  1. Откройте страницу репозитория на GitHub."
