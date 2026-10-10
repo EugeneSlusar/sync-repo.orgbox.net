@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.9"
+SCRIPT_VERSION="1.3.10"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -72,7 +72,7 @@ is_tool_repository() {
 }
 
 update_script_from_central_repository() {
-    local raw_url current_mode
+    local raw_url current_mode available_version update_choice newest_version
 
     [[ "${SYNC_REPO_AUTO_UPDATE:-1}" == "1" ]] || return 0
     is_tool_repository && return 0
@@ -94,6 +94,43 @@ update_script_from_central_repository() {
     fi
 
     if ! cmp -s "${SCRIPT_FILE}" "${UPDATE_TEMP_FILE}"; then
+        # Read the version without executing downloaded code before consent.
+        available_version="$(sed -n 's/^SCRIPT_VERSION="\([^"]*\)"$/\1/p' "${UPDATE_TEMP_FILE}" | head -n 1)"
+        if [[ ! "${available_version}" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+            echo "Предупреждение: не удалось определить версию скачанного скрипта." >&2
+            return 0
+        fi
+        newest_version="$(printf '%s\n' "${SCRIPT_VERSION}" "${available_version}" | LC_ALL=C sort -V | tail -n 1)"
+        if [[ "${available_version}" == "${SCRIPT_VERSION}" ]] \
+            || [[ "${newest_version}" != "${available_version}" ]]; then
+            rm -f -- "${UPDATE_TEMP_FILE}"
+            UPDATE_TEMP_FILE=""
+            return 0
+        fi
+
+        echo "Доступна новая версия скрипта: ${available_version} (установлена ${SCRIPT_VERSION})."
+        if [[ "${AUTO_MODE}" == true ]]; then
+            echo "В режиме --auto скрипт не обновляется без подтверждения. Продолжаю с ${SCRIPT_VERSION}."
+            echo "Для обновления запустите скрипт интерактивно, без --auto."
+            rm -f -- "${UPDATE_TEMP_FILE}"
+            UPDATE_TEMP_FILE=""
+            return 0
+        fi
+        echo "1) Да, обновить скрипт и продолжить"
+        echo "2) Нет, продолжить с установленной версией"
+        if ! IFS= read -r -p "Выберите пункт [2]: " update_choice; then
+            update_choice="2"
+        fi
+        case "${update_choice}" in
+            1|y|Y|yes|Yes|YES|д|Д|да|Да|ДА) ;;
+            *)
+                echo "Обновление скрипта пропущено. Продолжаю с ${SCRIPT_VERSION}."
+                rm -f -- "${UPDATE_TEMP_FILE}"
+                UPDATE_TEMP_FILE=""
+                return 0
+                ;;
+        esac
+
         current_mode="$(stat -c '%a' "${SCRIPT_FILE}" 2>/dev/null || true)"
         if [[ -n "${current_mode}" ]]; then
             chmod "${current_mode}" "${UPDATE_TEMP_FILE}" 2>/dev/null || chmod +x "${UPDATE_TEMP_FILE}"
