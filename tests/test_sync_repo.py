@@ -13,10 +13,10 @@ SCRIPT = Path(__file__).resolve().parents[1] / ".deploy/sync_repo_from_git.sh"
 
 
 class SyncRepoTest(unittest.TestCase):
-    def run_cmd(self, *args, cwd=None, check=True, env=None):
+    def run_cmd(self, *args, cwd=None, check=True, env=None, input=None):
         result = subprocess.run(args, cwd=cwd, env=env, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=30)
+                                timeout=30, input=input)
         if check and result.returncode:
             self.fail(result.stdout + result.stderr)
         return result
@@ -82,6 +82,70 @@ class SyncRepoTest(unittest.TestCase):
         self.assertEqual((project / "public_html/.htaccess").read_text(), "local rules")
         self.assertTrue((project / ".deploy/sync_repo_from_git.sh").is_file())
         self.assertTrue((project / ".deploy/sync_repo_from_git.conf").is_file())
+
+    def interactive_deploy(self, project, answer, env=None):
+        return self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
+                            env=env or self.env, check=False, input="1\n" + answer)
+
+    def test_confirmation_restores_repo_and_backs_up_worktree_and_index(self):
+        project = self.fixture()
+        local_file = project / "public_html/include/app.php"
+        local_file.write_text("staged logo\n")
+        self.git(project, "add", "public_html/include/app.php")
+        local_file.write_text("working logo\n")
+        result = self.interactive_deploy(project, "1\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(local_file.read_text(), "new\n")
+        refs = self.git(project, "for-each-ref", "--format=%(refname)", "refs/sync-repo/backups/").splitlines()
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(self.git(project, "show", refs[0] + ":public_html/include/app.php"), "working logo")
+        self.assertEqual(self.git(project, "show", refs[0] + "^2:public_html/include/app.php"), "staged logo")
+        self.assert_runtime(project)
+
+    def test_decline_empty_input_or_eof_preserves_local_edits(self):
+        for answer in ("2\n", "\n", ""):
+            with self.subTest(answer=answer):
+                project = self.fixture(name="decline-" + str(len(list(self.root.glob('decline-*')))))
+                local_file = project / "public_html/include/app.php"
+                local_file.write_text("local logo\n")
+                result = self.interactive_deploy(project, answer)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(local_file.read_text(), "local logo\n")
+                self.assertEqual(self.git(project, "rev-parse", "HEAD"), self.base)
+                self.assertEqual(self.git(project, "for-each-ref", "refs/sync-repo/backups/"), "")
+                self.assert_runtime(project)
+
+    def test_confirmed_staged_addition_is_preserved_in_backup(self):
+        project = self.fixture()
+        path = project / "public_html/local-only.php"
+        path.write_text("local addition")
+        self.git(project, "add", "public_html/local-only.php")
+        result = self.interactive_deploy(project, "1\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(path.exists())
+        ref = self.git(project, "for-each-ref", "--format=%(refname)", "refs/sync-repo/backups/")
+        self.assertEqual(self.git(project, "show", ref + ":public_html/local-only.php"), "local addition")
+        self.assert_runtime(project)
+
+    def test_backup_failure_does_not_reset_edits(self):
+        project = self.fixture()
+        local_file = project / "public_html/include/app.php"
+        local_file.write_text("local logo\n")
+        directory = self.root / "mock-git"
+        directory.mkdir()
+        wrapper = directory / "git"
+        real_git = shutil.which("git")
+        wrapper.write_text('#!/usr/bin/env bash\n'
+                           'if [[ ${1:-} == stash && ${2:-} == create ]]; then exit 1; fi\n'
+                           'exec "$REAL_GIT" "$@"\n')
+        wrapper.chmod(0o755)
+        env = dict(self.env, REAL_GIT=real_git)
+        env["PATH"] = str(directory) + os.pathsep + env["PATH"]
+        result = self.interactive_deploy(project, "1\n", env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(local_file.read_text(), "local logo\n")
+        self.assertEqual(self.git(project, "rev-parse", "HEAD"), self.base)
+        self.assert_runtime(project)
 
     def test_update_preserves_runtime_even_with_clean_requested(self):
         project = self.fixture()
@@ -155,7 +219,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.3.8"', 'SCRIPT_VERSION="test-update"', 1).replace(
+            'SCRIPT_VERSION="1.3.9"', 'SCRIPT_VERSION="test-update"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
