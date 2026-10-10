@@ -95,12 +95,50 @@ class SyncRepoTest(unittest.TestCase):
         local_file.write_text("working logo\n")
         result = self.interactive_deploy(project, "1\n")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        worktree = result.stdout.index("Изменения в рабочих файлах")
+        staged = result.stdout.index("Изменения, подготовленные через git add")
+        prompt = result.stdout.index("Заменить эти правки версией origin/main?")
+        self.assertIn("-staged logo\n+working logo", result.stdout[worktree:staged])
+        self.assertIn("-old\n+staged logo", result.stdout[staged:prompt])
         self.assertEqual(local_file.read_text(), "new\n")
         refs = self.git(project, "for-each-ref", "--format=%(refname)", "refs/sync-repo/backups/").splitlines()
         self.assertEqual(len(refs), 1)
         self.assertEqual(self.git(project, "show", refs[0] + ":public_html/include/app.php"), "working logo")
         self.assertEqual(self.git(project, "show", refs[0] + "^2:public_html/include/app.php"), "staged logo")
         self.assert_runtime(project)
+
+    def test_diff_shows_only_nonempty_sections_before_decline(self):
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                project = self.fixture(name=f"diff-{staged}")
+                local_file = project / "public_html/include/app.php"
+                local_file.write_text("local logo\n")
+                if staged:
+                    self.git(project, "add", "public_html/include/app.php")
+                result = self.interactive_deploy(project, "2\n")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                prompt = result.stdout.index("Заменить эти правки версией origin/main?")
+                self.assertIn("-old\n+local logo", result.stdout[:prompt])
+                self.assertEqual("Изменения в рабочих файлах" in result.stdout, not staged)
+                self.assertEqual("Изменения, подготовленные через git add" in result.stdout, staged)
+                self.assertEqual(local_file.read_text(), "local logo\n")
+                self.assertEqual(self.git(project, "rev-parse", "HEAD"), self.base)
+
+    def test_diff_does_not_run_external_diff_textconv_or_pager(self):
+        project = self.fixture()
+        helper = self.root / "diff-helper"
+        marker = self.root / "diff-helper-called"
+        helper.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 1\n')
+        helper.chmod(0o755)
+        self.git(project, "config", "diff.external", str(helper))
+        self.git(project, "config", "core.pager", str(helper))
+        self.git(project, "config", "diff.custom.textconv", str(helper))
+        (project / ".git/info/attributes").write_text("*.php diff=custom\n")
+        (project / "public_html/include/app.php").write_text("local logo\n")
+        result = self.interactive_deploy(project, "2\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-old\n+local logo", result.stdout)
+        self.assertFalse(marker.exists())
 
     def test_decline_empty_input_or_eof_preserves_local_edits(self):
         for answer in ("2\n", "\n", ""):
@@ -219,7 +257,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.3.10"', 'SCRIPT_VERSION="1.3.11"', 1).replace(
+            'SCRIPT_VERSION="1.3.11"', 'SCRIPT_VERSION="1.3.12"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -236,7 +274,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.10"', 'SCRIPT_VERSION="1.3.11"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.11"', 'SCRIPT_VERSION="1.3.12"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -250,20 +288,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.10"', 'SCRIPT_VERSION="1.3.11"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.11"', 'SCRIPT_VERSION="1.3.12"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.3.11", result.stdout)
+        self.assertIn("1.3.12", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.3.10", "1.3.9"):
+        for version in ("1.3.11", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.10"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.11"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -274,7 +312,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.10"', 'SCRIPT_VERSION="1.3.11"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.11"', 'SCRIPT_VERSION="1.3.12"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
