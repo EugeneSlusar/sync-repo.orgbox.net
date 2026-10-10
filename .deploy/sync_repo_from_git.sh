@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.8"
+SCRIPT_VERSION="1.3.9"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -751,7 +751,8 @@ elif [[ "$(git remote get-url "${REMOTE}")" != "${REPOSITORY_URL}" ]]; then
 fi
 echo
 echo "Обновляются только файлы под управлением Git; общей очистки локальных файлов нет."
-echo "При локальных правках или конфликте с существующими файлами обновление остановится."
+echo "При локальных правках предложу сохранить копию и заменить их версией из репозитория."
+echo "В режиме --auto локальные правки останавливают обновление; конфликты локальных файлов также защищены."
 echo
 
 if [[ "${AUTO_MODE}" == false ]]; then
@@ -762,7 +763,7 @@ if [[ "${AUTO_MODE}" == false ]]; then
         echo "3) Настроить автодеплой через GitHub Actions"
         echo "4) Отмена"
         printf "Выберите пункт [4]: "
-        IFS= read -rsn1 CONFIRM
+        IFS= read -r CONFIRM
         printf '\n'
         case "${CONFIRM}" in
             1)
@@ -861,19 +862,59 @@ if ! git show-ref --verify --quiet "refs/remotes/${REMOTE}/${BRANCH}"; then
     exit 1
 fi
 
-# Refuse to discard tracked edits or unpublished commits.
-if ! git diff --quiet --ignore-submodules=none -- \
-    || ! git diff --cached --quiet --ignore-submodules=none --; then
-    echo "Ошибка: есть локальные изменения отслеживаемых файлов. Обновление остановлено." >&2
-    git status --short --untracked-files=no >&2
-    echo "Сохраните и разберите эти изменения перед повторным запуском." >&2
-    exit 1
-fi
-
+# Refuse to reset unpublished commits before offering to restore local edits.
 if git rev-parse --verify HEAD >/dev/null 2>&1; then
     if ! git merge-base --is-ancestor HEAD "${REMOTE}/${BRANCH}"; then
         echo "Ошибка: локальная история содержит коммиты, которых нет в целевой ветке." >&2
         echo "Обновление остановлено: локальные коммиты не будут сброшены." >&2
+        exit 1
+    fi
+fi
+
+if ! git diff --quiet --ignore-submodules=none -- \
+    || ! git diff --cached --quiet --ignore-submodules=none --; then
+    echo "Обнаружены локальные изменения отслеживаемых файлов:"
+    git status --short --untracked-files=no
+    if [[ "${AUTO_MODE}" == true ]]; then
+        echo "Ошибка: режим --auto не сбрасывает локальные правки без подтверждения." >&2
+        echo "Запустите скрипт без --auto и выберите восстановление из репозитория." >&2
+        exit 1
+    fi
+
+    echo
+    echo "Заменить эти правки версией ${REMOTE}/${BRANCH}?"
+    echo "1) Да, сохранить резервную копию правок и восстановить из репозитория"
+    echo "2) Нет, оставить правки и отменить обновление"
+    if ! IFS= read -r -p "Выберите пункт [2]: " RESTORE_CHOICE; then
+        echo "Подтверждение не получено. Правки сохранены, обновление отменено."
+        exit 0
+    fi
+    case "${RESTORE_CHOICE}" in
+        1|y|Y|yes|Yes|YES|д|Д|да|Да|ДА) ;;
+        *)
+            echo "Правки сохранены, обновление отменено."
+            exit 0
+            ;;
+    esac
+
+    # Create a stash snapshot without changing the worktree, and anchor it with
+    # a private Git ref so garbage collection cannot remove the backup.
+    if ! BACKUP_COMMIT="$(git stash create "sync-repo: before restoring ${REMOTE}/${BRANCH}")" \
+        || [[ -z "${BACKUP_COMMIT}" ]]; then
+        echo "Ошибка: не удалось сохранить резервную копию правок. Восстановление отменено." >&2
+        exit 1
+    fi
+    BACKUP_REF="refs/sync-repo/backups/$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
+    git update-ref "${BACKUP_REF}" "${BACKUP_COMMIT}"
+    echo "Резервная копия правок сохранена: ${BACKUP_REF}"
+    echo "Для возврата правок: git stash apply --index ${BACKUP_REF}"
+
+    # Clear only tracked/indexed edits. The checkout below then installs the
+    # selected remote version without force or deletion of unrelated files.
+    git restore --source=HEAD --staged --worktree -- .
+    if ! git diff --quiet --ignore-submodules=none -- \
+        || ! git diff --cached --quiet --ignore-submodules=none --; then
+        echo "Ошибка: остались локальные изменения (например, в подмодулях). Обновление остановлено." >&2
         exit 1
     fi
 fi
