@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.7"
+SCRIPT_VERSION="1.3.8"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -79,26 +79,36 @@ update_script_from_central_repository() {
     command -v curl >/dev/null 2>&1 || return 0
 
     raw_url="https://raw.githubusercontent.com/EugeneSlusar/sync-repo.orgbox.net/${TOOL_REPOSITORY_REF}/.deploy/sync_repo_from_git.sh"
-    UPDATE_TEMP_FILE="$(mktemp "${TMPDIR:-/tmp}/sync-repo-script.XXXXXX")"
+    if ! UPDATE_TEMP_FILE="$(mktemp "${SCRIPT_DIR}/.sync-repo-update.XXXXXX")"; then
+        echo "Предупреждение: каталог скрипта недоступен для самообновления." >&2
+        return 0
+    fi
     if ! curl -fsSL --connect-timeout 10 --max-time 30 "${raw_url}" -o "${UPDATE_TEMP_FILE}"; then
         echo "Предупреждение: не удалось проверить обновление sync_repo_from_git.sh." >&2
         return 0
     fi
 
+    if ! bash -n "${UPDATE_TEMP_FILE}"; then
+        echo "Предупреждение: скачанное обновление не прошло проверку синтаксиса Bash." >&2
+        return 0
+    fi
+
     if ! cmp -s "${SCRIPT_FILE}" "${UPDATE_TEMP_FILE}"; then
         current_mode="$(stat -c '%a' "${SCRIPT_FILE}" 2>/dev/null || true)"
+        if [[ -n "${current_mode}" ]]; then
+            chmod "${current_mode}" "${UPDATE_TEMP_FILE}" 2>/dev/null || chmod +x "${UPDATE_TEMP_FILE}"
+        else
+            chmod +x "${UPDATE_TEMP_FILE}"
+        fi
         mv -f -- "${UPDATE_TEMP_FILE}" "${SCRIPT_FILE}"
         UPDATE_TEMP_FILE=""
-        if [[ -n "${current_mode}" ]]; then
-            chmod "${current_mode}" "${SCRIPT_FILE}" 2>/dev/null || chmod +x "${SCRIPT_FILE}"
-        else
-            chmod +x "${SCRIPT_FILE}"
-        fi
         echo "Скрипт sync_repo_from_git.sh обновлён из центрального репозитория."
+        # Continue with the downloaded version, preserving --auto and other arguments.
+        exec bash "${SCRIPT_FILE}" "$@"
     fi
 }
 
-update_script_from_central_repository
+update_script_from_central_repository "$@"
 
 ensure_local_files_are_excluded() {
     local exclude_file exclude_pattern protected_file relative_path
@@ -110,10 +120,12 @@ ensure_local_files_are_excluded() {
     mkdir -p -- "$(dirname -- "${exclude_file}")"
     touch "${exclude_file}"
     for protected_file in \
+        "${SCRIPT_FILE}" \
         "${CONFIG_FILE}" \
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key" \
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key.pub" \
         "${PROJECT_CONFIG_DIR}/github_actions_deploy_key.pub"; do
+        [[ "${protected_file}" == "${REPO_DIR}/"* ]] || continue
         relative_path="${protected_file#"${REPO_DIR}/"}"
         exclude_pattern="/${relative_path}"
         if ! grep -Fqx -- "${exclude_pattern}" "${exclude_file}"; then
@@ -553,7 +565,7 @@ show_sync_status() {
     echo "Статус синхронизации"
     echo "  Локальная ветка:    ${current_branch}"
     echo "  Локальный коммит:   ${local_commit}"
-    echo "  Remote-коммит:      ${remote_commit}"
+    echo "  Remote-коммит (последний fetch): ${remote_commit}"
 
     if [[ "${local_commit}" != "нет коммитов" ]] && [[ "${remote_commit}" != "нет данных" ]]; then
         read -r ahead behind < <(git rev-list --left-right --count "HEAD...refs/remotes/${REMOTE}/${BRANCH}" 2>/dev/null || echo "0 0")
@@ -738,8 +750,8 @@ elif [[ "$(git remote get-url "${REMOTE}")" != "${REPOSITORY_URL}" ]]; then
     echo "Remote:       URL ${REMOTE} будет обновлён"
 fi
 echo
-echo "Локальные изменения отслеживаемых файлов и неотслеживаемые файлы будут удалены."
-echo "Файлы из .gitignore (настройки, секреты и runtime-данные) останутся на месте."
+echo "Обновляются только файлы под управлением Git; общей очистки локальных файлов нет."
+echo "При локальных правках или конфликте с существующими файлами обновление остановится."
 echo
 
 if [[ "${AUTO_MODE}" == false ]]; then
@@ -849,19 +861,36 @@ if ! git show-ref --verify --quiet "refs/remotes/${REMOTE}/${BRANCH}"; then
     exit 1
 fi
 
+# Refuse to discard tracked edits or unpublished commits.
+if ! git diff --quiet --ignore-submodules=none -- \
+    || ! git diff --cached --quiet --ignore-submodules=none --; then
+    echo "Ошибка: есть локальные изменения отслеживаемых файлов. Обновление остановлено." >&2
+    git status --short --untracked-files=no >&2
+    echo "Сохраните и разберите эти изменения перед повторным запуском." >&2
+    exit 1
+fi
+
+if git rev-parse --verify HEAD >/dev/null 2>&1; then
+    if ! git merge-base --is-ancestor HEAD "${REMOTE}/${BRANCH}"; then
+        echo "Ошибка: локальная история содержит коммиты, которых нет в целевой ветке." >&2
+        echo "Обновление остановлено: локальные коммиты не будут сброшены." >&2
+        exit 1
+    fi
+fi
+
 echo "Синхронизация рабочей копии..."
-git checkout --force -B "${BRANCH}" "${REMOTE}/${BRANCH}"
+# Git normally overwrites ignored files at incoming tracked paths. Disable that.
+if ! git checkout --no-overwrite-ignore -B "${BRANCH}" "${REMOTE}/${BRANCH}"; then
+    echo "Ошибка: Git не смог безопасно обновить рабочую копию." >&2
+    echo "Проверьте сообщение выше: возможен конфликт с локальным файлом или ошибка доступа." >&2
+    exit 1
+fi
 chmod +x "${SCRIPT_FILE}"
 git branch --set-upstream-to="${REMOTE}/${BRANCH}" "${BRANCH}" >/dev/null
 if [[ "${GIT_CLEAN:-0}" == "1" ]]; then
-    if [[ -n "${SCRIPT_RELATIVE_PATH}" ]]; then
-        git clean -fd -e "${SCRIPT_RELATIVE_PATH}"
-    else
-        git clean -fd -e ".deploy/"
-    fi
-else
-    echo "Локальные неотслеживаемые файлы сохранены. Для очистки задайте GIT_CLEAN=1."
+    echo "GIT_CLEAN=1 проигнорирован: общая очистка отключена в версии ${SCRIPT_VERSION}."
 fi
+echo "Локальные неотслеживаемые файлы сохранены. Общая очистка не выполнялась."
 
 echo "Готово: сервер синхронизирован с ${REMOTE}/${BRANCH}."
 git log -1 --oneline

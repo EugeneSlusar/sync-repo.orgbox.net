@@ -1,0 +1,19 @@
+name: Check sync-repo
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Check Bash syntax
+        run: bash -n .deploy/sync_repo_from_git.sh
+      - name: Test deployment and self-update without network access
+        run: python3 tests/test_sync_repo.py
