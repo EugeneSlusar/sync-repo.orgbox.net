@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.10"
+SCRIPT_VERSION="1.3.11"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -916,6 +916,17 @@ if ! git diff --quiet --ignore-submodules=none -- \
         echo "Ошибка: режим --auto не сбрасывает локальные правки без подтверждения." >&2
         echo "Запустите скрипт без --auto и выберите восстановление из репозитория." >&2
         exit 1
+    fi
+
+    if ! git diff --quiet --ignore-submodules=none --; then
+        echo
+        echo "Изменения в рабочих файлах (относительно индекса):"
+        git --no-pager diff --no-ext-diff --no-textconv --ignore-submodules=none --
+    fi
+    if ! git diff --cached --quiet --ignore-submodules=none --; then
+        echo
+        echo "Изменения, подготовленные через git add (относительно HEAD):"
+        git --no-pager diff --cached --no-ext-diff --no-textconv --ignore-submodules=none --
     fi
 
     echo
