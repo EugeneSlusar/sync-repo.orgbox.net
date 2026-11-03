@@ -11,6 +11,20 @@
 
 Настройки и секреты сохраняются локально и не должны добавляться в Git.
 
+## Установка
+
+Репозиторий публичный. Из корня проекта одной командой создайте каталог `.deploy` и скачайте туда скрипт:
+
+```bash
+mkdir -p .deploy && curl -fsSL -o .deploy/sync_repo_from_git.sh https://raw.githubusercontent.com/EugeneSlusar/sync-repo.orgbox.net/main/.deploy/sync_repo_from_git.sh
+```
+
+Установка и первый запуск вместе:
+
+```bash
+mkdir -p .deploy && curl -fsSL -o .deploy/sync_repo_from_git.sh https://raw.githubusercontent.com/EugeneSlusar/sync-repo.orgbox.net/main/.deploy/sync_repo_from_git.sh && bash .deploy/sync_repo_from_git.sh
+```
+
 ## Запуск
 
 Запустите скрипт из корня нужного проекта:
