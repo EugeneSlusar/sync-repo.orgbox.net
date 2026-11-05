@@ -2,6 +2,7 @@
 """Exercise deployment against local Git repositories without network access."""
 
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -199,6 +200,99 @@ class SyncRepoTest(unittest.TestCase):
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
+    def legacy_git_env(self, passthrough=False):
+        """Emulate unsupported Git options while using real local repositories."""
+        directory = self.root / "legacy-bin"
+        directory.mkdir(exist_ok=True)
+        wrapper = directory / "git"
+        wrapper.write_text(
+            '#!/usr/bin/env bash\n'
+            'if [[ ${1:-} == rev-parse && ${2:-} == --git-path ]]; then\n'
+            '  printf "%s\\n" --git-path\n'
+            '  if [[ $LEGACY_PASSTHROUGH == 1 ]]; then printf "%s\\n" "$3"; exit 0; fi\n'
+            '  echo "fatal: ambiguous argument info/exclude" >&2; exit 128\n'
+            'fi\n'
+            'if [[ ${1:-} == remote && ${2:-} == get-url ]]; then exit 129; fi\n'
+            'if [[ ${1:-} == --list-cmds=* || ${1:-} == restore ]]; then exit 129; fi\n'
+            '# Old Git ignores GIT_SSH_COMMAND; exercise its GIT_SSH replacement.\n'
+            'if [[ " $* " == *" fetch "* && -n ${SYNC_SSH_PRIVATE_KEY:-} ]]; then\n'
+            '  unset GIT_SSH_COMMAND\n'
+            '  "$GIT_SSH" git@example.invalid git-upload-pack || exit $?\n'
+            'fi\n'
+            'exec "$REAL_GIT" "$@"\n')
+        wrapper.chmod(0o755)
+        env = dict(self.env, REAL_GIT=shutil.which("git"),
+                   LEGACY_PASSTHROUGH=str(int(passthrough)))
+        env["PATH"] = str(directory) + os.pathsep + env["PATH"]
+        return env
+
+    def test_legacy_git_first_install_and_repeat_preserve_runtime(self):
+        for passthrough in (False, True):
+            with self.subTest(passthrough=passthrough):
+                project = self.fixture(name=f"legacy-{passthrough}", fresh=True)
+                env = self.legacy_git_env(passthrough)
+                for _ in range(2):
+                    result = self.deploy(project, env)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
+                    self.assertIn("/.deploy/sync_repo_from_git.conf",
+                                  (project / ".git/info/exclude").read_text())
+                    self.assertFalse((project / "--git-path").exists())
+                    self.assert_runtime(project)
+
+    def test_legacy_git_keeps_edits_when_restore_is_unavailable(self):
+        project = self.fixture()
+        local_file = project / "public_html/include/app.php"
+        local_file.write_text("local edit\n")
+        result = self.interactive_deploy(project, "1\n", self.legacy_git_env())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Git 2.23", result.stderr)
+        self.assertEqual(local_file.read_text(), "local edit\n")
+        self.assertEqual(self.git(project, "rev-parse", "HEAD"), self.base)
+        self.assertEqual(self.git(project, "for-each-ref", "refs/sync-repo/backups/"), "")
+        self.assert_runtime(project)
+
+    def test_legacy_git_ssh_uses_selected_key_and_removes_wrapper(self):
+        project = self.fixture(fresh=True)
+        key = project / ".deploy/key with spaces"
+        key.write_text("test key")
+        (project / ".deploy/sync_repo_from_git.conf").write_text(
+            f"REPOSITORY_URL={self.remote}\nREMOTE=origin\nBRANCH=main\n"
+            f"AUTH_MODE=ssh\nSSH_PRIVATE_KEY={key}\n")
+        env = self.legacy_git_env()
+        ssh = self.root / "legacy-bin/ssh"
+        ssh.write_text('#!/usr/bin/env python3\nimport json, os, sys\n'
+                       'open(os.environ["SSH_MARKER"], "w").write(json.dumps(sys.argv[1:]))\n')
+        ssh.chmod(0o755)
+        marker = self.root / "ssh-args"
+        env.update(SSH_MARKER=str(marker), TMPDIR=str(self.root))
+        result = self.deploy(project, env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        args = json.loads(marker.read_text())
+        self.assertEqual(args[:2], ["-i", str(key)])
+        self.assertIn("IdentitiesOnly=yes", args)
+        self.assertIn("StrictHostKeyChecking=accept-new", args)
+        self.assertEqual(args[-2:], ["git@example.invalid", "git-upload-pack"])
+        self.assertEqual(list(self.root.glob("sync-repo-ssh.*")), [])
+        self.assert_runtime(project)
+
+    def test_linked_worktree_uses_common_excludes(self):
+        main_project = self.root / "main-project"
+        self.run_cmd("git", "clone", str(self.remote), str(main_project))
+        self.git(main_project, "checkout", "--detach")
+        project = self.root / "linked-project"
+        self.git(main_project, "worktree", "add", "-b", "deployment", str(project), self.base)
+        (project / ".deploy").mkdir()
+        shutil.copy2(SCRIPT, project / ".deploy/sync_repo_from_git.sh")
+        (project / ".deploy/sync_repo_from_git.conf").write_text(
+            f"REPOSITORY_URL={self.remote}\nREMOTE=origin\nBRANCH=main\n"
+            "AUTH_MODE=basic\nAUTH_USERNAME=test\nAUTH_SECRET=test\n")
+        result = self.deploy(project)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("/.deploy/sync_repo_from_git.conf",
+                      (main_project / ".git/info/exclude").read_text())
+        self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
+
     def test_local_edits_are_not_lost(self):
         for staged in (False, True):
             with self.subTest(staged=staged):
@@ -257,7 +351,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.3.11"', 'SCRIPT_VERSION="1.3.12"', 1).replace(
+            'SCRIPT_VERSION="1.3.12"', 'SCRIPT_VERSION="1.3.13"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -274,7 +368,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.11"', 'SCRIPT_VERSION="1.3.12"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.12"', 'SCRIPT_VERSION="1.3.13"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -288,20 +382,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.11"', 'SCRIPT_VERSION="1.3.12"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.12"', 'SCRIPT_VERSION="1.3.13"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.3.12", result.stdout)
+        self.assertIn("1.3.13", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.3.11", "1.3.10"):
+        for version in ("1.3.12", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.11"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.12"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -312,7 +406,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.11"', 'SCRIPT_VERSION="1.3.12"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.12"', 'SCRIPT_VERSION="1.3.13"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -333,3 +427,4 @@ class SyncRepoTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

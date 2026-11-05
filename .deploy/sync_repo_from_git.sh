@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.11"
+SCRIPT_VERSION="1.3.12"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -40,12 +40,16 @@ AUTH_SECRET=""
 SSH_PRIVATE_KEY=""
 SSH_PRIVATE_KEY_PATH=""
 ASKPASS_FILE=""
+SSH_WRAPPER_FILE=""
 UPDATE_TEMP_FILE=""
 ACTIONS_PRIVATE_KEY_TEMP=""
 TOOL_REPOSITORY_URL="${SYNC_REPO_TOOL_REPOSITORY:-https://github.com/EugeneSlusar/sync-repo.orgbox.net.git}"
 TOOL_REPOSITORY_REF="${SYNC_REPO_TOOL_REF:-main}"
 
 cleanup() {
+    if [[ -n "${SSH_WRAPPER_FILE}" ]] && [[ -f "${SSH_WRAPPER_FILE}" ]]; then
+        rm -f -- "${SSH_WRAPPER_FILE}"
+    fi
     if [[ -n "${ASKPASS_FILE}" ]] && [[ -f "${ASKPASS_FILE}" ]]; then
         rm -f -- "${ASKPASS_FILE}"
     fi
@@ -61,10 +65,15 @@ trap cleanup EXIT
 
 printf '\033[2J\033[H'
 
+# Git before 2.7 has no `remote get-url`; read the configured fetch URL there.
+git_remote_url() {
+    git remote get-url "$1" 2>/dev/null || git config --get "remote.$1.url"
+}
+
 is_tool_repository() {
     local current_remote normalized_current normalized_tool
 
-    current_remote="$(git -C "${REPO_DIR}" remote get-url origin 2>/dev/null || true)"
+    current_remote="$(cd -- "${REPO_DIR}" && git_remote_url origin 2>/dev/null || true)"
     normalized_current="${current_remote%.git}"
     normalized_tool="${TOOL_REPOSITORY_URL%.git}"
     [[ "${normalized_current}" == "${normalized_tool}" ]] \
@@ -152,7 +161,12 @@ ensure_local_files_are_excluded() {
 
     git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
 
-    exclude_file="$(git rev-parse --git-path info/exclude)"
+    # Older Git treats info/exclude as a revision when --git-path is unknown.
+    # Preserve modern Git's linked-worktree resolution; fall back to --git-dir.
+    if ! exclude_file="$(git rev-parse --git-path info/exclude 2>/dev/null)" \
+        || [[ -z "${exclude_file}" || "${exclude_file}" == --git-path* ]]; then
+        exclude_file="$(git rev-parse --git-dir)/info/exclude"
+    fi
 
     mkdir -p -- "$(dirname -- "${exclude_file}")"
     touch "${exclude_file}"
@@ -377,7 +391,7 @@ create_github_repository() {
     echo "Создание репозитория на GitHub..."
     gh repo create "${repository_name}" "${repository_visibility}" \
         --source="${REPO_DIR}" --remote="${REMOTE}" --push
-    REPOSITORY_URL="$(git remote get-url "${REMOTE}")"
+    REPOSITORY_URL="$(git_remote_url "${REMOTE}")"
     echo "GitHub-репозиторий подключён: ${REPOSITORY_URL}"
 }
 
@@ -584,6 +598,17 @@ prepare_askpass() {
     chmod 700 "${ASKPASS_FILE}"
 }
 
+prepare_ssh_wrapper() {
+    # Git before 2.3 ignores GIT_SSH_COMMAND. GIT_SSH accepts an executable
+    # filename, so pass the key through the environment without shell expansion.
+    SSH_WRAPPER_FILE="$(mktemp "${TMPDIR:-/tmp}/sync-repo-ssh.XXXXXX")"
+    {
+        echo '#!/usr/bin/env bash'
+        echo 'exec ssh -i "$SYNC_SSH_PRIVATE_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$@"'
+    } > "${SSH_WRAPPER_FILE}"
+    chmod 700 "${SSH_WRAPPER_FILE}"
+}
+
 fetch_repository() {
     # Shared hosting can impose a very small process/thread limit. Limiting
     # pack processing keeps fetch usable without changing the repository.
@@ -648,7 +673,7 @@ fi
 
 LOCAL_REMOTE_CONFIGURED=false
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-    && git remote get-url "${REMOTE}" >/dev/null 2>&1; then
+    && git_remote_url "${REMOTE}" >/dev/null 2>&1; then
     LOCAL_REMOTE_CONFIGURED=true
 fi
 
@@ -694,9 +719,9 @@ if [[ -e "${REPO_DIR}/.git" ]] && git rev-parse --is-inside-work-tree >/dev/null
     CURRENT_BRANCH="$(git symbolic-ref --quiet --short HEAD || true)"
     ensure_local_files_are_excluded
 
-    if git remote get-url "${REMOTE}" >/dev/null 2>&1; then
+    if git_remote_url "${REMOTE}" >/dev/null 2>&1; then
         REMOTE_IS_CONFIGURED=true
-        DETECTED_REPOSITORY_URL="$(git remote get-url "${REMOTE}")"
+        DETECTED_REPOSITORY_URL="$(git_remote_url "${REMOTE}")"
     fi
 fi
 
@@ -783,7 +808,7 @@ else
 fi
 if [[ "${REMOTE_IS_CONFIGURED}" == false ]]; then
     echo "Remote:       ${REMOTE} будет добавлен"
-elif [[ "$(git remote get-url "${REMOTE}")" != "${REPOSITORY_URL}" ]]; then
+elif [[ "$(git_remote_url "${REMOTE}")" != "${REPOSITORY_URL}" ]]; then
     echo "Remote:       URL ${REMOTE} будет обновлён"
 fi
 echo
@@ -833,7 +858,7 @@ fi
 if [[ "${REMOTE_IS_CONFIGURED}" == false ]]; then
     echo "Добавление remote ${REMOTE}..."
     git remote add "${REMOTE}" "${REPOSITORY_URL}"
-elif [[ "$(git remote get-url "${REMOTE}")" != "${REPOSITORY_URL}" ]]; then
+elif [[ "$(git_remote_url "${REMOTE}")" != "${REPOSITORY_URL}" ]]; then
     echo "Обновление URL remote ${REMOTE}..."
     git remote set-url "${REMOTE}" "${REPOSITORY_URL}"
 fi
@@ -847,9 +872,15 @@ fi
 
 echo "Получение изменений из GitHub..."
 if [[ "${AUTH_MODE}" == "ssh" ]]; then
-    if ! SYNC_SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY_PATH}" \
-        GIT_SSH_COMMAND="ssh -i \"${SSH_PRIVATE_KEY_PATH}\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-        fetch_repository; then
+    prepare_ssh_wrapper
+    if ! (
+        export SYNC_SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY_PATH}"
+        export GIT_SSH="${SSH_WRAPPER_FILE}"
+        # Use the same quoted wrapper on old and new Git, even if the caller
+        # supplied GIT_SSH_COMMAND (which otherwise overrides GIT_SSH).
+        unset GIT_SSH_COMMAND
+        fetch_repository
+    ); then
         echo "Ошибка: не удалось получить данные по SSH." >&2
         echo "Проверьте Deploy Key в GitHub, настройки в ${CONFIG_FILE} и права репозитория." >&2
         exit 1
@@ -945,6 +976,14 @@ if ! git diff --quiet --ignore-submodules=none -- \
             ;;
     esac
 
+    # `restore` requires Git 2.23. Fail before backup/reset on older versions;
+    # replacing it with reset --hard could delete unrelated local files.
+    if ! git --list-cmds=main 2>/dev/null | grep -Fx restore >/dev/null; then
+        echo "Ошибка: для восстановления локальных правок нужен Git 2.23 или новее." >&2
+        echo "Правки сохранены без изменений. Обновите Git и повторите запуск." >&2
+        exit 1
+    fi
+
     # Create a stash snapshot without changing the worktree, and anchor it with
     # a private Git ref so garbage collection cannot remove the backup.
     if ! BACKUP_COMMIT="$(git stash create "sync-repo: before restoring ${REMOTE}/${BRANCH}")" \
@@ -983,3 +1022,4 @@ echo "Локальные неотслеживаемые файлы сохран�
 
 echo "Готово: сервер синхронизирован с ${REMOTE}/${BRANCH}."
 git log -1 --oneline
+
