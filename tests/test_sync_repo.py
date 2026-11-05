@@ -217,6 +217,7 @@ class SyncRepoTest(unittest.TestCase):
             '# Old Git ignores GIT_SSH_COMMAND; exercise its GIT_SSH replacement.\n'
             'if [[ " $* " == *" fetch "* && -n ${SYNC_SSH_PRIVATE_KEY:-} ]]; then\n'
             '  unset GIT_SSH_COMMAND\n'
+            '  if [[ $GIT_SSH == "${NOEXEC_DIR:-/nonexistent}/"* ]]; then exit 126; fi\n'
             '  "$GIT_SSH" git@example.invalid git-upload-pack || exit $?\n'
             'fi\n'
             'exec "$REAL_GIT" "$@"\n')
@@ -262,19 +263,67 @@ class SyncRepoTest(unittest.TestCase):
         env = self.legacy_git_env()
         ssh = self.root / "legacy-bin/ssh"
         ssh.write_text('#!/usr/bin/env python3\nimport json, os, sys\n'
-                       'open(os.environ["SSH_MARKER"], "w").write(json.dumps(sys.argv[1:]))\n')
+                       'open(os.environ["SSH_MARKER"], "w").write(json.dumps({"args":sys.argv[1:], "helper":os.environ["GIT_SSH"]}))\n'
+                       'sys.exit(int(os.environ.get("SSH_EXIT_CODE", "0")))\n')
         ssh.chmod(0o755)
         marker = self.root / "ssh-args"
-        env.update(SSH_MARKER=str(marker), TMPDIR=str(self.root))
+        noexec = self.root / "noexec-tmp"
+        noexec.mkdir()
+        env.update(SSH_MARKER=str(marker), TMPDIR=str(noexec), NOEXEC_DIR=str(noexec))
         result = self.deploy(project, env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        args = json.loads(marker.read_text())
+        record = json.loads(marker.read_text())
+        args = record["args"]
+        self.assertEqual(Path(record["helper"]).parent, project / ".deploy")
+        self.assertFalse(Path(record["helper"]).exists())
         self.assertEqual(args[:2], ["-i", str(key)])
         self.assertIn("IdentitiesOnly=yes", args)
         self.assertIn("StrictHostKeyChecking=accept-new", args)
         self.assertEqual(args[-2:], ["git@example.invalid", "git-upload-pack"])
         self.assertEqual(list(self.root.glob("sync-repo-ssh.*")), [])
+        self.assertEqual(list(noexec.iterdir()), [])
+        self.assertEqual(list((project / ".deploy").glob(".sync-repo-ssh.*")), [])
+        # The EXIT trap must also remove the helper after a failed SSH fetch.
+        result = self.deploy(project, dict(env, SSH_EXIT_CODE="1"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(list((project / ".deploy").glob(".sync-repo-ssh.*")), [])
+        self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
+
+    def test_askpass_avoids_noexec_tmp_and_is_cleaned(self):
+        project = self.fixture(fresh=True)
+        config = project / ".deploy/sync_repo_from_git.conf"
+        config.write_text(config.read_text().replace(str(self.remote), "https://example.invalid/repo.git"))
+        directory = self.root / "askpass-bin"
+        directory.mkdir()
+        wrapper = directory / "git"
+        wrapper.write_text(
+            '#!/usr/bin/env bash\nset -euo pipefail\n'
+            'if [[ " $* " == *" fetch "* ]]; then\n'
+            '  [[ $GIT_ASKPASS != "$TMPDIR/"* ]] || exit 126\n'
+            '  [[ $("$GIT_ASKPASS" Username) == test ]]\n'
+            '  [[ $("$GIT_ASKPASS" Password) == test ]]\n'
+            '  "$REAL_GIT" check-ignore -- "$GIT_ASKPASS" >/dev/null\n'
+            '  printf "%s\\n" "$GIT_ASKPASS" > "$HELPER_MARKER"\n'
+            '  [[ ${FAIL_FETCH:-0} == 0 ]] || exit 1\n'
+            '  exec "$REAL_GIT" fetch --prune "$LOCAL_REMOTE" "+refs/heads/*:refs/remotes/origin/*"\n'
+            'fi\nexec "$REAL_GIT" "$@"\n')
+        wrapper.chmod(0o755)
+        noexec = self.root / "noexec-tmp"
+        noexec.mkdir()
+        marker = self.root / "askpass-path"
+        env = dict(self.env, REAL_GIT=shutil.which("git"), LOCAL_REMOTE=str(self.remote),
+                   HELPER_MARKER=str(marker), TMPDIR=str(noexec))
+        env["PATH"] = str(directory) + os.pathsep + env["PATH"]
+        for fail_fetch in ("0", "1"):
+            result = self.deploy(project, dict(env, FAIL_FETCH=fail_fetch))
+            self.assertEqual(result.returncode == 0, fail_fetch == "0", result.stdout + result.stderr)
+            helper = Path(marker.read_text().strip())
+            self.assertEqual(helper.parent, project / ".deploy")
+            self.assertFalse(helper.exists())
+            self.assertEqual(list(noexec.iterdir()), [])
+            self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
+            self.assert_runtime(project)
 
     def test_linked_worktree_uses_common_excludes(self):
         main_project = self.root / "main-project"
@@ -351,7 +400,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.3.12"', 'SCRIPT_VERSION="1.3.13"', 1).replace(
+            'SCRIPT_VERSION="1.3.13"', 'SCRIPT_VERSION="1.3.14"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -368,7 +417,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.12"', 'SCRIPT_VERSION="1.3.13"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.13"', 'SCRIPT_VERSION="1.3.14"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -382,20 +431,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.12"', 'SCRIPT_VERSION="1.3.13"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.13"', 'SCRIPT_VERSION="1.3.14"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.3.13", result.stdout)
+        self.assertIn("1.3.14", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.3.12", "1.3.10"):
+        for version in ("1.3.13", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.12"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.13"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -406,7 +455,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.12"', 'SCRIPT_VERSION="1.3.13"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.13"', 'SCRIPT_VERSION="1.3.14"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)

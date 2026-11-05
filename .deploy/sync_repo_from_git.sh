@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.12"
+SCRIPT_VERSION="1.3.13"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -173,6 +173,8 @@ ensure_local_files_are_excluded() {
     for protected_file in \
         "${SCRIPT_FILE}" \
         "${CONFIG_FILE}" \
+        "${PROJECT_CONFIG_DIR}/.sync-repo-ssh.*" \
+        "${PROJECT_CONFIG_DIR}/.sync-repo-askpass.*" \
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key" \
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key.pub" \
         "${PROJECT_CONFIG_DIR}/github_actions_deploy_key.pub"; do
@@ -587,7 +589,9 @@ WORKFLOW
 }
 
 prepare_askpass() {
-    ASKPASS_FILE="$(mktemp "${TMPDIR:-/tmp}/sync-repo-askpass.XXXXXX")"
+    # Shared hosting often mounts /tmp with noexec. Git executes this helper,
+    # so keep it beside the local configuration and exclude it from Git.
+    ASKPASS_FILE="$(mktemp "${PROJECT_CONFIG_DIR}/.sync-repo-askpass.XXXXXX")"
     {
         echo '#!/usr/bin/env bash'
         echo 'case "$1" in'
@@ -601,7 +605,9 @@ prepare_askpass() {
 prepare_ssh_wrapper() {
     # Git before 2.3 ignores GIT_SSH_COMMAND. GIT_SSH accepts an executable
     # filename, so pass the key through the environment without shell expansion.
-    SSH_WRAPPER_FILE="$(mktemp "${TMPDIR:-/tmp}/sync-repo-ssh.XXXXXX")"
+    # /tmp may be mounted noexec even after chmod 700. Executable helpers
+    # belong beside the configuration; cleanup removes them on exit.
+    SSH_WRAPPER_FILE="$(mktemp "${PROJECT_CONFIG_DIR}/.sync-repo-ssh.XXXXXX")"
     {
         echo '#!/usr/bin/env bash'
         echo 'exec ssh -i "$SYNC_SSH_PRIVATE_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$@"'
