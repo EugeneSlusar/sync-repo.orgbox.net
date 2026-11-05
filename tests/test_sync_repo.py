@@ -3,10 +3,13 @@
 
 import os
 import json
+import errno
+import pty
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 
 
@@ -192,6 +195,63 @@ class SyncRepoTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
+
+    def test_terminal_sync_never_opens_git_pager(self):
+        # A pipe hides this bug: Git starts its pager only with a terminal on stdout.
+        for setting in ("core.pager", "pager.log", "GIT_PAGER"):
+            with self.subTest(setting=setting):
+                project = self.fixture(name="pager-" + setting)
+                marker = self.root / (setting + "-called")
+                pager = self.root / (setting + "-pager")
+                pager.write_text(f'#!/bin/sh\ntouch "{marker}"\ncat\n')
+                pager.chmod(0o755)
+                env = dict(self.env, TERM="xterm")
+                if setting == "GIT_PAGER":
+                    env["GIT_PAGER"] = str(pager)
+                else:
+                    self.git(project, "config", setting, str(pager))
+                master, slave = pty.openpty()
+                chunks = []
+
+                def read_terminal():
+                    while True:
+                        try:
+                            chunk = os.read(master, 65536)
+                        except OSError as error:
+                            if error.errno == errno.EIO:
+                                break
+                            raise
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+
+                reader = threading.Thread(target=read_terminal, daemon=True)
+                reader.start()
+                try:
+                    with subprocess.Popen(
+                            ["bash", ".deploy/sync_repo_from_git.sh", "--auto"],
+                            cwd=project, env=env, stdin=subprocess.DEVNULL,
+                            stdout=slave, stderr=slave) as process:
+                        os.close(slave)
+                        slave = None
+                        try:
+                            returncode = process.wait(timeout=20)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                            self.fail("Synchronization waited for a terminal pager")
+                    reader.join(timeout=5)
+                    self.assertFalse(reader.is_alive(), "Terminal did not close")
+                finally:
+                    if slave is not None:
+                        os.close(slave)
+                    os.close(master)
+                output = b"".join(chunks).decode(errors="replace")
+                self.assertEqual(returncode, 0, output)
+                self.assertFalse(marker.exists(), output)
+                self.assertIn("Update", output)
+                self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
+                self.assert_runtime(project)
 
     def test_first_install_preserves_existing_runtime(self):
         project = self.fixture(fresh=True)
@@ -400,7 +460,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.3.13"', 'SCRIPT_VERSION="1.3.14"', 1).replace(
+            'SCRIPT_VERSION="1.3.14"', 'SCRIPT_VERSION="1.3.15"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -417,7 +477,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.13"', 'SCRIPT_VERSION="1.3.14"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.14"', 'SCRIPT_VERSION="1.3.15"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -431,20 +491,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.13"', 'SCRIPT_VERSION="1.3.14"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.14"', 'SCRIPT_VERSION="1.3.15"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.3.14", result.stdout)
+        self.assertIn("1.3.15", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.3.13", "1.3.10"):
+        for version in ("1.3.14", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.13"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.14"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -455,7 +515,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.13"', 'SCRIPT_VERSION="1.3.14"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.14"', 'SCRIPT_VERSION="1.3.15"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -476,4 +536,5 @@ class SyncRepoTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -2,7 +2,11 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.13"
+# Вывод Git внутри скрипта не должен открывать less и ждать нажатия q.
+# Переопределяем pager только для этого процесса, не меняя настройки пользователя.
+export GIT_PAGER=cat
+
+SCRIPT_VERSION="1.3.14"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -1027,5 +1031,6 @@ fi
 echo "Локальные неотслеживаемые файлы сохранены. Общая очистка не выполнялась."
 
 echo "Готово: сервер синхронизирован с ${REMOTE}/${BRANCH}."
-git log -1 --oneline
+git --no-pager log -1 --oneline
+
 
