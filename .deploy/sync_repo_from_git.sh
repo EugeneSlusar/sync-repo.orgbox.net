@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.4.1"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -444,20 +444,36 @@ ensure_gh_cli() {
 
     url="https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_${arch}.tar.gz"
     echo "Скачиваю GitHub CLI ${GH_CLI_VERSION} в ${PROJECT_CONFIG_DIR}/bin ..."
-    work="$(mktemp -d "${PROJECT_CONFIG_DIR}/.sync-repo-gh.XXXXXX")" || return 1
-    if curl -fsSL -o "${work}/gh.tar.gz" "${url}" \
-        && tar -xzf "${work}/gh.tar.gz" -C "${work}" \
-        && mkdir -p -- "${PROJECT_CONFIG_DIR}/bin" \
-        && cp -- "${work}"/gh_*/bin/gh "${PROJECT_CONFIG_DIR}/bin/gh" \
-        && chmod 755 "${PROJECT_CONFIG_DIR}/bin/gh" \
-        && "${PROJECT_CONFIG_DIR}/bin/gh" --version >/dev/null 2>&1; then
+    work="$(mktemp -d "${PROJECT_CONFIG_DIR}/.sync-repo-gh.XXXXXX")" || {
+        echo "GitHub CLI: не удалось создать временный каталог в ${PROJECT_CONFIG_DIR}." >&2
+        return 1
+    }
+    if ! curl -fsSL --connect-timeout 15 -o "${work}/gh.tar.gz" "${url}"; then
+        echo "GitHub CLI: ошибка скачивания ${url}" >&2
+        echo "  (проверьте доступ сервера к github.com и release-assets.githubusercontent.com)" >&2
         rm -rf -- "${work}"
-        GH_BIN="${PROJECT_CONFIG_DIR}/bin/gh"
-        return 0
+        return 1
+    fi
+    if ! tar -xzf "${work}/gh.tar.gz" -C "${work}"; then
+        echo "GitHub CLI: не удалось распаковать архив (размер: $(wc -c < "${work}/gh.tar.gz") байт)." >&2
+        rm -rf -- "${work}"
+        return 1
+    fi
+    if ! mkdir -p -- "${PROJECT_CONFIG_DIR}/bin" \
+        || ! cp -- "${work}"/gh_*/bin/gh "${PROJECT_CONFIG_DIR}/bin/gh" \
+        || ! chmod 755 "${PROJECT_CONFIG_DIR}/bin/gh"; then
+        echo "GitHub CLI: не удалось записать ${PROJECT_CONFIG_DIR}/bin/gh (квота диска или права)." >&2
+        rm -rf -- "${work}"
+        return 1
     fi
     rm -rf -- "${work}"
-    echo "GitHub CLI: не удалось скачать или запустить gh." >&2
-    return 1
+    if ! "${PROJECT_CONFIG_DIR}/bin/gh" --version >/dev/null 2>&1; then
+        echo "GitHub CLI: gh скачан, но не запускается (возможно, каталог смонтирован с noexec)." >&2
+        echo "  Проверка: ${PROJECT_CONFIG_DIR}/bin/gh --version" >&2
+        return 1
+    fi
+    GH_BIN="${PROJECT_CONFIG_DIR}/bin/gh"
+    return 0
 }
 
 # Создаёт секреты и коммитит deploy.yml в GitHub через API. Токен нигде не сохраняется.
