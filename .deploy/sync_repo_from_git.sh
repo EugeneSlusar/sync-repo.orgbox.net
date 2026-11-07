@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.4.2"
+SCRIPT_VERSION="1.4.3"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -421,12 +421,24 @@ github_slug_from_url() {
     printf '%s\n' "${slug}"
 }
 
+# gh на shared-хостингах с лимитом потоков падает в Go-рантайме; GOMAXPROCS=1 это лечит.
+gh_runs() {
+    local bin="$1"
+
+    "${bin}" --version >/dev/null 2>&1 && return 0
+    if GOMAXPROCS=1 "${bin}" --version >/dev/null 2>&1; then
+        export GOMAXPROCS=1
+        return 0
+    fi
+    return 1
+}
+
 # Находит GitHub CLI или скачивает его в .deploy/bin без root-прав.
 ensure_gh_cli() {
     local candidate arch url work
 
     for candidate in "${SYNC_REPO_GH_BIN:-}" "$(command -v gh 2>/dev/null || true)" "${PROJECT_CONFIG_DIR}/bin/gh" "${HOME}/.local/bin/gh" "${HOME}/bin/gh"; do
-        if [[ -n "${candidate}" ]] && [[ -x "${candidate}" ]] && "${candidate}" --version >/dev/null 2>&1; then
+        if [[ -n "${candidate}" ]] && [[ -x "${candidate}" ]] && gh_runs "${candidate}"; then
             GH_BIN="${candidate}"
             return 0
         fi
@@ -471,12 +483,13 @@ ensure_gh_cli() {
         mkdir -p -- "${install_dir}" 2>/dev/null || continue
         cp -- "${gh_src}" "${install_dir}/gh" 2>/dev/null || continue
         chmod 755 "${install_dir}/gh" 2>/dev/null || continue
-        if run_error="$("${install_dir}/gh" --version 2>&1)"; then
+        if gh_runs "${install_dir}/gh"; then
             rm -rf -- "${work}"
             GH_BIN="${install_dir}/gh"
             echo "GitHub CLI установлен: ${GH_BIN}"
             return 0
         fi
+        run_error="$("${install_dir}/gh" --version 2>&1 | head -n 8)" || true
         echo "GitHub CLI: ${install_dir}/gh не запускается: ${run_error:-нет вывода}" >&2
         rm -f -- "${install_dir}/gh"
     done
