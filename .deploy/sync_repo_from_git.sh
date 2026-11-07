@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.4.3"
+SCRIPT_VERSION="1.4.4"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -526,10 +526,15 @@ configure_github_automatically() {
         read -r -s -p "Токен GitHub: " token || return 1
         echo
     fi
+    token="${token//[[:space:]]/}"
     [[ -n "${token}" ]] || { echo "Токен не указан." >&2; return 1; }
 
-    if ! GH_TOKEN="${token}" "${GH_BIN}" api "repos/${slug}" --jq .full_name >/dev/null 2>&1; then
+    local api_error
+    if ! api_error="$(GH_TOKEN="${token}" "${GH_BIN}" api "repos/${slug}" --jq .full_name 2>&1)"; then
         echo "Ошибка: токен не даёт доступа к ${slug}." >&2
+        echo "Ответ GitHub: $(printf '%s\n' "${api_error}" | head -n 5)" >&2
+        echo "Проверьте: токен вставлен целиком; Resource owner — владелец репозитория;" >&2
+        echo "Repository access включает ${slug}; срок действия токена не истёк." >&2
         return 1
     fi
 
