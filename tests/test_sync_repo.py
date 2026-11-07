@@ -460,7 +460,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.4.2"', 'SCRIPT_VERSION="1.4.3"', 1).replace(
+            'SCRIPT_VERSION="1.4.3"', 'SCRIPT_VERSION="1.4.4"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -477,7 +477,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.2"', 'SCRIPT_VERSION="1.4.3"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.3"', 'SCRIPT_VERSION="1.4.4"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -491,20 +491,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.2"', 'SCRIPT_VERSION="1.4.3"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.3"', 'SCRIPT_VERSION="1.4.4"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.4.3", result.stdout)
+        self.assertIn("1.4.4", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.4.2", "1.3.10"):
+        for version in ("1.4.3", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.2"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.3"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -515,7 +515,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.2"', 'SCRIPT_VERSION="1.4.3"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.3"', 'SCRIPT_VERSION="1.4.4"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -646,7 +646,7 @@ exit 0
         cfg.mkdir()
         home = self.root / "home2"
         home.mkdir()
-        func = subprocess.run(["bash", "-c", "sed -n '/^ensure_gh_cli()/,/^}/p' " + str(SCRIPT)],
+        func = subprocess.run(["bash", "-c", "sed -n '/^gh_runs()/,/^}/p;/^ensure_gh_cli()/,/^}/p' " + str(SCRIPT)],
                               text=True, capture_output=True).stdout
         env = dict(self.env, HOME=str(home), PATH=str(tools) + os.pathsep + "/usr/bin:/bin")
         env.pop("SYNC_REPO_GH_BIN", None)
@@ -658,6 +658,38 @@ exit 0
         self.assertIn("не запускается: noexec", result.stderr)
         self.assertFalse((cfg / "bin/gh").exists())
         self.assertEqual(list(cfg.glob(".sync-repo-gh.*")), [])
+
+
+    def test_gh_install_retries_with_single_thread_limit(self):
+        # gh «падает» без GOMAXPROCS=1 (лимит потоков хостинга) — скрипт включает его сам
+        tools = self.root / "fake_tools2"
+        tools.mkdir()
+        pkg = self.root / "pkg2/gh_2.89.0_linux_amd64/bin"
+        pkg.mkdir(parents=True)
+        (pkg / "gh").write_text(
+            "#!/usr/bin/env bash\n[[ ${GOMAXPROCS:-} == 1 ]] || { echo 'runtime: failed to create new OS thread' >&2; exit 2; }\n"
+            "echo 'gh version 2.89.0'\n")
+        (pkg / "gh").chmod(0o755)
+        tarball = self.root / "gh2.tar.gz"
+        self.run_cmd("tar", "-czf", str(tarball), "-C", str(self.root / "pkg2"), "gh_2.89.0_linux_amd64")
+        (tools / "curl").write_text(
+            "#!/usr/bin/env bash\nwhile [[ $# -gt 0 ]]; do [[ $1 == -o ]] && o=$2; shift; done\n"
+            f"cp {tarball} \"$o\"\n")
+        (tools / "curl").chmod(0o755)
+        cfg = self.root / "cfg2"
+        cfg.mkdir()
+        home = self.root / "home3"
+        home.mkdir()
+        func = subprocess.run(["bash", "-c", "sed -n '/^gh_runs()/,/^}/p;/^ensure_gh_cli()/,/^}/p' " + str(SCRIPT)],
+                              text=True, capture_output=True).stdout
+        env = dict(self.env, HOME=str(home), PATH=str(tools) + os.pathsep + "/usr/bin:/bin")
+        env.pop("SYNC_REPO_GH_BIN", None)
+        env.pop("GOMAXPROCS", None)
+        result = self.run_cmd("bash", "-c",
+                              f"GH_BIN=''; GH_CLI_VERSION=2.89.0; PROJECT_CONFIG_DIR={cfg}\n{func}\n"
+                              'ensure_gh_cli && echo "BIN=$GH_BIN GOMAXPROCS=$GOMAXPROCS"', env=env, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"BIN={cfg}/bin/gh GOMAXPROCS=1", result.stdout)
 
 
 if __name__ == "__main__":
