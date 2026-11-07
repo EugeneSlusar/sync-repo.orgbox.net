@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.3.14"
+SCRIPT_VERSION="1.4.0"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -47,6 +47,8 @@ ASKPASS_FILE=""
 SSH_WRAPPER_FILE=""
 UPDATE_TEMP_FILE=""
 ACTIONS_PRIVATE_KEY_TEMP=""
+GH_BIN=""
+GH_CLI_VERSION="${SYNC_REPO_GH_VERSION:-2.89.0}"
 TOOL_REPOSITORY_URL="${SYNC_REPO_TOOL_REPOSITORY:-https://github.com/EugeneSlusar/sync-repo.orgbox.net.git}"
 TOOL_REPOSITORY_REF="${SYNC_REPO_TOOL_REF:-main}"
 
@@ -179,6 +181,8 @@ ensure_local_files_are_excluded() {
         "${CONFIG_FILE}" \
         "${PROJECT_CONFIG_DIR}/.sync-repo-ssh.*" \
         "${PROJECT_CONFIG_DIR}/.sync-repo-askpass.*" \
+        "${PROJECT_CONFIG_DIR}/.sync-repo-gh.*" \
+        "${PROJECT_CONFIG_DIR}/bin/gh" \
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key" \
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key.pub" \
         "${PROJECT_CONFIG_DIR}/github_actions_deploy_key.pub"; do
@@ -401,6 +405,141 @@ create_github_repository() {
     echo "GitHub-репозиторий подключён: ${REPOSITORY_URL}"
 }
 
+# owner/repo из URL GitHub (https, scp-подобный SSH или ssh://).
+github_slug_from_url() {
+    local url="$1" slug
+
+    case "${url}" in
+        ssh://*) slug="${url#ssh://}"; slug="${slug#*/}" ;;
+        http://*|https://*) slug="${url#*://}"; slug="${slug#*@}"; slug="${slug#*/}" ;;
+        *@*:*) slug="${url#*:}" ;;
+        *) return 1 ;;
+    esac
+    slug="${slug%.git}"
+    slug="${slug%/}"
+    [[ "${slug}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+    printf '%s\n' "${slug}"
+}
+
+# Находит GitHub CLI или скачивает его в .deploy/bin без root-прав.
+ensure_gh_cli() {
+    local candidate arch url work
+
+    for candidate in "${SYNC_REPO_GH_BIN:-}" "$(command -v gh 2>/dev/null || true)" "${PROJECT_CONFIG_DIR}/bin/gh"; do
+        if [[ -n "${candidate}" ]] && [[ -x "${candidate}" ]] && "${candidate}" --version >/dev/null 2>&1; then
+            GH_BIN="${candidate}"
+            return 0
+        fi
+    done
+
+    case "$(uname -m)" in
+        x86_64|amd64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *) echo "GitHub CLI: архитектура $(uname -m) не поддерживается для автоустановки." >&2; return 1 ;;
+    esac
+    command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 || {
+        echo "GitHub CLI: для скачивания нужны curl и tar." >&2
+        return 1
+    }
+
+    url="https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_${arch}.tar.gz"
+    echo "Скачиваю GitHub CLI ${GH_CLI_VERSION} в ${PROJECT_CONFIG_DIR}/bin ..."
+    work="$(mktemp -d "${PROJECT_CONFIG_DIR}/.sync-repo-gh.XXXXXX")" || return 1
+    if curl -fsSL -o "${work}/gh.tar.gz" "${url}" \
+        && tar -xzf "${work}/gh.tar.gz" -C "${work}" \
+        && mkdir -p -- "${PROJECT_CONFIG_DIR}/bin" \
+        && cp -- "${work}"/gh_*/bin/gh "${PROJECT_CONFIG_DIR}/bin/gh" \
+        && chmod 755 "${PROJECT_CONFIG_DIR}/bin/gh" \
+        && "${PROJECT_CONFIG_DIR}/bin/gh" --version >/dev/null 2>&1; then
+        rm -rf -- "${work}"
+        GH_BIN="${PROJECT_CONFIG_DIR}/bin/gh"
+        return 0
+    fi
+    rm -rf -- "${work}"
+    echo "GitHub CLI: не удалось скачать или запустить gh." >&2
+    return 1
+}
+
+# Создаёт секреты и коммитит deploy.yml в GitHub через API. Токен нигде не сохраняется.
+# Аргументы: host port user path known_hosts private_key_file(или пусто) workflow_file
+configure_github_automatically() {
+    local deploy_host="$1" deploy_port="$2" deploy_user="$3" deploy_path="$4"
+    local known_hosts="$5" private_key_file="$6" workflow_file="$7"
+    local slug remote_url token branch sha content_b64 api_path
+    local -a put_args
+
+    remote_url="$(cd -- "${REPO_DIR}" && git_remote_url "${REMOTE:-origin}" 2>/dev/null || true)"
+    slug="$(github_slug_from_url "${remote_url:-${REPOSITORY_URL}}" 2>/dev/null || true)"
+    if [[ -z "${slug}" ]]; then
+        read -r -p "Репозиторий GitHub (владелец/название): " slug || return 1
+        [[ "${slug}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "Неверный формат репозитория." >&2; return 1; }
+    fi
+    branch="${BRANCH:-main}"
+
+    ensure_gh_cli || return 1
+
+    token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [[ -z "${token}" ]]; then
+        echo
+        echo "Нужен токен GitHub только для этой настройки (в файлы он не сохраняется)."
+        echo "Создайте fine-grained токен: https://github.com/settings/personal-access-tokens/new"
+        echo "  • Repository access: Only select repositories → ${slug}"
+        echo "  • Permissions: Secrets — Read and write; Contents — Read and write; Workflows — Read and write"
+        read -r -s -p "Токен GitHub: " token || return 1
+        echo
+    fi
+    [[ -n "${token}" ]] || { echo "Токен не указан." >&2; return 1; }
+
+    if ! GH_TOKEN="${token}" "${GH_BIN}" api "repos/${slug}" --jq .full_name >/dev/null 2>&1; then
+        echo "Ошибка: токен не даёт доступа к ${slug}." >&2
+        return 1
+    fi
+
+    echo "Создаю secrets в ${slug} ..."
+    local name value
+    for name in DEPLOY_HOST DEPLOY_PORT DEPLOY_USER DEPLOY_PATH DEPLOY_KNOWN_HOSTS; do
+        case "${name}" in
+            DEPLOY_HOST) value="${deploy_host}" ;;
+            DEPLOY_PORT) value="${deploy_port}" ;;
+            DEPLOY_USER) value="${deploy_user}" ;;
+            DEPLOY_PATH) value="${deploy_path}" ;;
+            DEPLOY_KNOWN_HOSTS) value="${known_hosts}" ;;
+        esac
+        if ! printf '%s' "${value}" | GH_TOKEN="${token}" "${GH_BIN}" secret set "${name}" --repo "${slug}" >/dev/null; then
+            echo "Ошибка: не удалось создать secret ${name}." >&2
+            return 1
+        fi
+        echo "  ✓ ${name}"
+    done
+    if [[ -n "${private_key_file}" ]]; then
+        if ! GH_TOKEN="${token}" "${GH_BIN}" secret set DEPLOY_SSH_KEY --repo "${slug}" < "${private_key_file}" >/dev/null; then
+            echo "Ошибка: не удалось создать secret DEPLOY_SSH_KEY." >&2
+            return 1
+        fi
+        echo "  ✓ DEPLOY_SSH_KEY"
+    else
+        echo "  • DEPLOY_SSH_KEY оставлен прежним (ключ уже существует)."
+    fi
+
+    api_path="repos/${slug}/contents/.github/workflows/deploy.yml"
+    sha="$(GH_TOKEN="${token}" "${GH_BIN}" api "${api_path}?ref=${branch}" --jq .sha 2>/dev/null || true)"
+    content_b64="$(base64 < "${workflow_file}" | tr -d '\n')"
+    put_args=(-X PUT "${api_path}" -f message="Add deploy workflow" -f branch="${branch}" -f content="${content_b64}")
+    [[ -z "${sha}" ]] || put_args+=(-f sha="${sha}")
+    if ! GH_TOKEN="${token}" "${GH_BIN}" api "${put_args[@]}" >/dev/null; then
+        echo "Ошибка: не удалось закоммитить deploy.yml в ветку ${branch}." >&2
+        return 1
+    fi
+    echo "  ✓ .github/workflows/deploy.yml закоммичен в ${branch}"
+
+    # Файл теперь есть в репозитории: локальную неотслеживаемую копию убираем,
+    # чтобы она не блокировала обновление конфликтом путей.
+    if ! (cd -- "${REPO_DIR}" && git ls-files --error-unmatch -- "${workflow_file#"${REPO_DIR}/"}" >/dev/null 2>&1); then
+        rm -f -- "${workflow_file}"
+    fi
+    return 0
+}
+
 setup_actions_autodeploy() {
     local deploy_host deploy_port deploy_user deploy_path workflow_file
     local actions_key actions_public known_hosts ssh_result existing_actions_key
@@ -541,6 +680,27 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
 WORKFLOW
+
+    if [[ "${AUTO_MODE}" == false ]]; then
+        local auto_answer=""
+        echo
+        read -r -p "Настроить GitHub автоматически (secrets и workflow через GitHub CLI)? [Y/n]: " auto_answer || auto_answer="n"
+        if [[ ! "${auto_answer}" =~ ^[NnНн] ]]; then
+            if configure_github_automatically "${deploy_host}" "${deploy_port}" "${deploy_user}" \
+                "${deploy_path}" "${known_hosts}" "${actions_key:-}" "${workflow_file}"; then
+                if [[ "${existing_actions_key}" == false ]]; then
+                    rm -f -- "${actions_key}" "${actions_key}.pub"
+                    ACTIONS_PRIVATE_KEY_TEMP=""
+                fi
+                echo
+                echo "Автодеплой настроен: secrets и workflow созданы в GitHub."
+                echo "Следующий push в ${BRANCH:-main} запустит деплой на ${deploy_host}."
+                read -r -p "Нажмите Enter для возврата в меню... " || true
+                return 0
+            fi
+            printf '\033[31m%s\033[0m\n' "Автонастройка не удалась — показываю инструкцию для ручной настройки."
+        fi
+    fi
 
     echo
     echo "============================================================"

@@ -460,7 +460,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.3.14"', 'SCRIPT_VERSION="1.3.15"', 1).replace(
+            'SCRIPT_VERSION="1.4.0"', 'SCRIPT_VERSION="1.4.1"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -477,7 +477,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.14"', 'SCRIPT_VERSION="1.3.15"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.0"', 'SCRIPT_VERSION="1.4.1"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -491,20 +491,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.14"', 'SCRIPT_VERSION="1.3.15"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.0"', 'SCRIPT_VERSION="1.4.1"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.3.15", result.stdout)
+        self.assertIn("1.4.1", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.3.14", "1.3.10"):
+        for version in ("1.4.0", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.14"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.0"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -515,7 +515,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.3.14"', 'SCRIPT_VERSION="1.3.15"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.0"', 'SCRIPT_VERSION="1.4.1"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -532,6 +532,98 @@ class SyncRepoTest(unittest.TestCase):
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual(list((project / ".deploy").glob(".sync-repo-update.*")), [])
         self.assert_runtime(project)
+
+    FAKE_GH = """#!/usr/bin/env bash
+echo "gh $* [token=${GH_TOKEN:-}]" >> "$FAKE_GH_LOG"
+case "$1" in
+  --version) echo "gh version 0.0.0" ;;
+  secret)
+    if [[ "${FAKE_GH_FAIL_SECRET:-}" == "$3" ]]; then exit 1; fi
+    echo "SECRET $3 <<$(cat)>>" >> "$FAKE_GH_LOG" ;;
+  api)
+    for a in "$@"; do
+      if [[ "$a" == "PUT" ]]; then echo "PUT $*" >> "$FAKE_GH_LOG"; fi
+    done ;;
+esac
+exit 0
+"""
+
+    def wizard(self, answers, extra_env=None):
+        project = self.fixture()
+        self.git(project, "remote", "set-url", "origin", "git@github.com:acme/site.git")
+        fake = self.root / "fake_gh"
+        fake.write_text(self.FAKE_GH)
+        fake.chmod(0o755)
+        log = self.root / "gh.log"
+        home = self.root / "home"
+        home.mkdir()
+        tools = self.root / "fake_tools"
+        tools.mkdir()
+        (tools / "ssh-keygen").write_text(
+            "#!/usr/bin/env bash\n"
+            "while [[ $# -gt 0 ]]; do [[ $1 == -f ]] && f=$2; shift; done\n"
+            "printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\\nFAKEKEY\\n-----END OPENSSH PRIVATE KEY-----\\n' > \"$f\"\n"
+            "echo 'ssh-ed25519 AAAAFAKE test' > \"$f.pub\"\n")
+        (tools / "ssh-keyscan").write_text("#!/usr/bin/env bash\necho '127.0.0.1 ssh-ed25519 AAAAHOST'\n")
+        (tools / "ssh").write_text("#!/usr/bin/env bash\nexit 1\n")
+        for tool in tools.iterdir():
+            tool.chmod(0o755)
+        env = dict(self.env, HOME=str(home), SYNC_REPO_GH_BIN=str(fake), FAKE_GH_LOG=str(log),
+                   PATH=str(tools) + os.pathsep + self.env["PATH"])
+        env.update(extra_env or {})
+        # меню: 3 → хост, порт, пользователь, путь, затем ответы мастера
+        result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project, env=env,
+                              check=False, input="3\n127.0.0.1\n9\nsiteuser\n/srv/site\n" + answers + "\n4\n")
+        return project, result, (log.read_text() if log.exists() else "")
+
+    def test_wizard_configures_github_automatically_without_manual_copy(self):
+        project, result, log = self.wizard("y\nghp_secret_token\n\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in ("DEPLOY_HOST", "DEPLOY_PORT", "DEPLOY_USER", "DEPLOY_PATH",
+                     "DEPLOY_KNOWN_HOSTS", "DEPLOY_SSH_KEY"):
+            self.assertIn("SECRET " + name, log)
+        self.assertIn("SECRET DEPLOY_HOST <<127.0.0.1>>", log)
+        self.assertIn("SECRET DEPLOY_USER <<siteuser>>", log)
+        self.assertIn("-----BEGIN OPENSSH PRIVATE KEY-----", log)
+        self.assertIn("repos/acme/site/contents/.github/workflows/deploy.yml", log)
+        self.assertIn("branch=main", log)
+        # ручной вывод секретов не показывается, токен не утёк в вывод и файлы
+        self.assertNotIn("BEGIN DEPLOY_SSH_KEY", result.stdout)
+        self.assertNotIn("ghp_secret_token", result.stdout + result.stderr)
+        for path in project.rglob("*"):
+            if path.is_file() and ".git/" not in str(path):
+                self.assertNotIn("ghp_secret_token", path.read_text(errors="ignore"), str(path))
+        # локальная копия workflow убрана, чтобы не блокировать будущий pull
+        self.assertFalse((project / ".github/workflows/deploy.yml").exists())
+
+    def test_wizard_falls_back_to_manual_instructions_on_failure(self):
+        project, result, log = self.wizard("y\nghp_secret_token\n\n",
+                                          {"FAKE_GH_FAIL_SECRET": "DEPLOY_USER"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Автонастройка не удалась", result.stdout + result.stderr)
+        self.assertIn("DEPLOY_SSH_KEY — КОПИРУЙТЕ ТОЛЬКО ЖЁЛТЫЙ БЛОК", result.stdout)
+        self.assertTrue((project / ".github/workflows/deploy.yml").exists())
+
+    def test_wizard_manual_choice_skips_github_cli(self):
+        project, result, log = self.wizard("n\n\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("SECRET", log)
+        self.assertIn("DEPLOY_SSH_KEY — КОПИРУЙТЕ ТОЛЬКО ЖЁЛТЫЙ БЛОК", result.stdout)
+
+    def test_github_slug_parsing(self):
+        script = (str(SCRIPT))
+        cases = {
+            "https://github.com/acme/site.git": "acme/site",
+            "git@github.com:acme/site.git": "acme/site",
+            "git@github-site:acme/site": "acme/site",
+            "ssh://git@github.com/acme/site.git": "acme/site",
+            "https://user:tok@github.com/acme/site": "acme/site",
+        }
+        func = subprocess.run(["bash", "-c", "sed -n '/^github_slug_from_url()/,/^}/p' " + script],
+                              text=True, capture_output=True).stdout
+        for url, slug in cases.items():
+            out = self.run_cmd("bash", "-c", func + '\ngithub_slug_from_url "$1"', "x", url).stdout.strip()
+            self.assertEqual(out, slug, url)
 
 
 if __name__ == "__main__":
