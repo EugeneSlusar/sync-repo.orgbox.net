@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.4.1"
+SCRIPT_VERSION="1.4.2"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -425,7 +425,7 @@ github_slug_from_url() {
 ensure_gh_cli() {
     local candidate arch url work
 
-    for candidate in "${SYNC_REPO_GH_BIN:-}" "$(command -v gh 2>/dev/null || true)" "${PROJECT_CONFIG_DIR}/bin/gh"; do
+    for candidate in "${SYNC_REPO_GH_BIN:-}" "$(command -v gh 2>/dev/null || true)" "${PROJECT_CONFIG_DIR}/bin/gh" "${HOME}/.local/bin/gh" "${HOME}/bin/gh"; do
         if [[ -n "${candidate}" ]] && [[ -x "${candidate}" ]] && "${candidate}" --version >/dev/null 2>&1; then
             GH_BIN="${candidate}"
             return 0
@@ -459,21 +459,30 @@ ensure_gh_cli() {
         rm -rf -- "${work}"
         return 1
     fi
-    if ! mkdir -p -- "${PROJECT_CONFIG_DIR}/bin" \
-        || ! cp -- "${work}"/gh_*/bin/gh "${PROJECT_CONFIG_DIR}/bin/gh" \
-        || ! chmod 755 "${PROJECT_CONFIG_DIR}/bin/gh"; then
-        echo "GitHub CLI: не удалось записать ${PROJECT_CONFIG_DIR}/bin/gh (квота диска или права)." >&2
+    local gh_src="" install_dir run_error=""
+    for gh_src in "${work}"/gh_*/bin/gh; do break; done
+    if [[ ! -f "${gh_src}" ]]; then
+        echo "GitHub CLI: в архиве не найден бинарник bin/gh." >&2
         rm -rf -- "${work}"
         return 1
     fi
+    # Рабочий каталог проекта может быть смонтирован с noexec: пробуем другие места.
+    for install_dir in "${PROJECT_CONFIG_DIR}/bin" "${HOME}/.local/bin" "${HOME}/bin" "${TMPDIR:-/tmp}/sync-repo-gh-$(id -u)"; do
+        mkdir -p -- "${install_dir}" 2>/dev/null || continue
+        cp -- "${gh_src}" "${install_dir}/gh" 2>/dev/null || continue
+        chmod 755 "${install_dir}/gh" 2>/dev/null || continue
+        if run_error="$("${install_dir}/gh" --version 2>&1)"; then
+            rm -rf -- "${work}"
+            GH_BIN="${install_dir}/gh"
+            echo "GitHub CLI установлен: ${GH_BIN}"
+            return 0
+        fi
+        echo "GitHub CLI: ${install_dir}/gh не запускается: ${run_error:-нет вывода}" >&2
+        rm -f -- "${install_dir}/gh"
+    done
     rm -rf -- "${work}"
-    if ! "${PROJECT_CONFIG_DIR}/bin/gh" --version >/dev/null 2>&1; then
-        echo "GitHub CLI: gh скачан, но не запускается (возможно, каталог смонтирован с noexec)." >&2
-        echo "  Проверка: ${PROJECT_CONFIG_DIR}/bin/gh --version" >&2
-        return 1
-    fi
-    GH_BIN="${PROJECT_CONFIG_DIR}/bin/gh"
-    return 0
+    echo "GitHub CLI: не удалось найти каталог, из которого можно запускать файлы." >&2
+    return 1
 }
 
 # Создаёт секреты и коммитит deploy.yml в GitHub через API. Токен нигде не сохраняется.
@@ -616,7 +625,9 @@ setup_actions_autodeploy() {
     fi
 
     ssh_result="ключ уже настроен"
-    if [[ "${existing_actions_key}" == false ]] && ssh -i "${actions_key}" -p "${deploy_port}" \
+    if [[ "${existing_actions_key}" == true ]]; then
+        ssh_result="ключ уже настроен"
+    elif ssh -i "${actions_key}" -p "${deploy_port}" \
         -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
         "${deploy_user}@${deploy_host}" "printf connected" >/dev/null 2>&1; then
         ssh_result="подключение успешно"
