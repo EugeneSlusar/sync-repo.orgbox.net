@@ -460,7 +460,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.4.1"', 'SCRIPT_VERSION="1.4.2"', 1).replace(
+            'SCRIPT_VERSION="1.4.2"', 'SCRIPT_VERSION="1.4.3"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -477,7 +477,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.1"', 'SCRIPT_VERSION="1.4.2"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.2"', 'SCRIPT_VERSION="1.4.3"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -491,20 +491,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.1"', 'SCRIPT_VERSION="1.4.2"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.2"', 'SCRIPT_VERSION="1.4.3"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.4.2", result.stdout)
+        self.assertIn("1.4.3", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.4.1", "1.3.10"):
+        for version in ("1.4.2", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.1"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.2"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -515,7 +515,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.1"', 'SCRIPT_VERSION="1.4.2"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.2"', 'SCRIPT_VERSION="1.4.3"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -624,6 +624,40 @@ exit 0
         for url, slug in cases.items():
             out = self.run_cmd("bash", "-c", func + '\ngithub_slug_from_url "$1"', "x", url).stdout.strip()
             self.assertEqual(out, slug, url)
+
+
+    def test_gh_install_falls_back_when_project_dir_is_noexec(self):
+        # gh из .deploy/bin «не запускается» (имитация noexec) — берётся каталог в $HOME
+        tools = self.root / "fake_tools"
+        tools.mkdir()
+        pkg = self.root / "pkg/gh_2.89.0_linux_amd64/bin"
+        pkg.mkdir(parents=True)
+        (pkg / "gh").write_text(
+            "#!/usr/bin/env bash\ncase \"$0\" in */cfg/bin/*) echo 'noexec' >&2; exit 126;; esac\n"
+            "echo 'gh version 2.89.0'\n")
+        (pkg / "gh").chmod(0o755)
+        tarball = self.root / "gh.tar.gz"
+        self.run_cmd("tar", "-czf", str(tarball), "-C", str(self.root / "pkg"), "gh_2.89.0_linux_amd64")
+        (tools / "curl").write_text(
+            "#!/usr/bin/env bash\nwhile [[ $# -gt 0 ]]; do [[ $1 == -o ]] && o=$2; shift; done\n"
+            f"cp {tarball} \"$o\"\n")
+        (tools / "curl").chmod(0o755)
+        cfg = self.root / "cfg"
+        cfg.mkdir()
+        home = self.root / "home2"
+        home.mkdir()
+        func = subprocess.run(["bash", "-c", "sed -n '/^ensure_gh_cli()/,/^}/p' " + str(SCRIPT)],
+                              text=True, capture_output=True).stdout
+        env = dict(self.env, HOME=str(home), PATH=str(tools) + os.pathsep + "/usr/bin:/bin")
+        env.pop("SYNC_REPO_GH_BIN", None)
+        result = self.run_cmd("bash", "-c",
+                              f"GH_BIN=''; GH_CLI_VERSION=2.89.0; PROJECT_CONFIG_DIR={cfg}\n{func}\n"
+                              'ensure_gh_cli && echo "BIN=$GH_BIN"', env=env, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"BIN={home}/.local/bin/gh", result.stdout)
+        self.assertIn("не запускается: noexec", result.stderr)
+        self.assertFalse((cfg / "bin/gh").exists())
+        self.assertEqual(list(cfg.glob(".sync-repo-gh.*")), [])
 
 
 if __name__ == "__main__":
