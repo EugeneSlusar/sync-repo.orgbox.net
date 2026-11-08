@@ -469,3 +469,5 @@ L_m235='Запускаю хук после деплоя .deploy/post_deploy.sh .
 L_m236='Ошибка: хук после деплоя завершился с кодом ${hook_status}. Файлы синхронизированы, но шаг после деплоя не выполнен.'
 # en:   • .github/workflows/deploy.yml already exists in ${branch}: left unchanged, only secrets were written. To replace it, set SYNC_REPO_OVERWRITE_WORKFLOW=1.
 L_m237='  • .github/workflows/deploy.yml уже есть в ${branch}: не изменён, записаны только secrets. Чтобы заменить файл, задайте SYNC_REPO_OVERWRITE_WORKFLOW=1.'
+# en: Web access to ${dir} is blocked with .htaccess.
+L_m238='Веб-доступ к ${dir} закрыт файлом .htaccess.'
