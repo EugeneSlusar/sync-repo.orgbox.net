@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.5.1"
+SCRIPT_VERSION="1.5.2"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -346,6 +346,7 @@ ensure_local_files_are_excluded() {
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key" \
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key.pub" \
         "${PROJECT_CONFIG_DIR}/github_actions_deploy_key.pub" \
+        "${PROJECT_CONFIG_DIR}/github_actions_deploy.workflow.yml" \
         "${PROJECT_CONFIG_DIR}/lang/*"; do
         [[ "${protected_file}" == "${REPO_DIR}/"* ]] || continue
         # В репозитории инструмента языковые пакеты отслеживаются Git.
@@ -804,6 +805,13 @@ configure_github_automatically() {
 
     api_path="repos/${slug}/contents/.github/workflows/deploy.yml"
     sha="$(GH_TOKEN="${token}" "${GH_BIN}" api "${api_path}?ref=${branch}" --jq .sha 2>/dev/null || true)"
+    if [[ -n "${sha}" && "${SYNC_REPO_OVERWRITE_WORKFLOW:-}" != "1" ]]; then
+        # В репозитории уже есть свой deploy.yml (например, с проверками тестов и PR):
+        # мастер не коммитит поверх него и не трогает ветку в обход PR.
+        echo "$(t m237 "  • .github/workflows/deploy.yml already exists in ${branch}: left unchanged, only secrets were written. To replace it, set SYNC_REPO_OVERWRITE_WORKFLOW=1.")"
+        rm -f -- "${workflow_file}"
+        return 0
+    fi
     content_b64="$(base64 < "${workflow_file}" | tr -d '\n')"
     put_args=(-X PUT "${api_path}" -f message="Add deploy workflow" -f branch="${branch}" -f content="${content_b64}")
     [[ -z "${sha}" ]] || put_args+=(-f sha="${sha}")
@@ -813,11 +821,8 @@ configure_github_automatically() {
     fi
     echo "$(t m089 "  ✓ .github/workflows/deploy.yml committed to ${branch}")"
 
-    # Файл теперь есть в репозитории: локальную неотслеживаемую копию убираем,
-    # чтобы она не блокировала обновление конфликтом путей.
-    if ! (cd -- "${REPO_DIR}" && git ls-files --error-unmatch -- "${workflow_file#"${REPO_DIR}/"}" >/dev/null 2>&1); then
-        rm -f -- "${workflow_file}"
-    fi
+    # Файл теперь есть в репозитории: временный шаблон больше не нужен.
+    rm -f -- "${workflow_file}"
     return 0
 }
 
@@ -915,8 +920,10 @@ setup_actions_autodeploy() {
 
     ssh_result="$(actions_ssh_result)"
 
-    workflow_file="${REPO_DIR}/.github/workflows/deploy.yml"
-    mkdir -p -- "$(dirname -- "${workflow_file}")"
+    # Шаблон пишем рядом с настройками, а не в .github/workflows проекта:
+    # иначе он превращается в локальную правку отслеживаемого deploy.yml
+    # и останавливает автообновление (--auto).
+    workflow_file="${PROJECT_CONFIG_DIR}/github_actions_deploy.workflow.yml"
     cat > "${workflow_file}" <<'WORKFLOW'
 name: Deploy to server
 
