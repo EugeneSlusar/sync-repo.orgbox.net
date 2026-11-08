@@ -55,7 +55,8 @@ class SyncRepoTest(unittest.TestCase):
         for key in list(self.env):
             if key.startswith(("GIT_", "SYNC_REPO_")):
                 self.env.pop(key)
-        self.env.update(SYNC_REPO_AUTO_UPDATE="0", GIT_CLEAN="1")
+        lang_dir = str(Path(__file__).resolve().parents[1] / ".deploy/lang")
+        self.env.update(SYNC_REPO_AUTO_UPDATE="0", GIT_CLEAN="1", SYNC_REPO_LANG="ru", SYNC_REPO_LANG_DIR=lang_dir)
 
     def fixture(self, name="project", fresh=False):
         project = self.root / name
@@ -460,7 +461,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.4.7"', 'SCRIPT_VERSION="1.4.8"', 1).replace(
+            'SCRIPT_VERSION="1.5.0"', 'SCRIPT_VERSION="1.5.1"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -477,7 +478,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.7"', 'SCRIPT_VERSION="1.4.8"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.0"', 'SCRIPT_VERSION="1.5.1"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -491,20 +492,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.7"', 'SCRIPT_VERSION="1.4.8"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.0"', 'SCRIPT_VERSION="1.5.1"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.4.8", result.stdout)
+        self.assertIn("1.5.1", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.4.7", "1.3.10"):
+        for version in ("1.5.0", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.7"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.0"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -515,7 +516,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.4.7"', 'SCRIPT_VERSION="1.4.8"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.0"', 'SCRIPT_VERSION="1.5.1"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -576,7 +577,7 @@ exit 0
         env.update(extra_env or {})
         # меню: 3 → хост, порт, пользователь, путь, затем ответы мастера
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project, env=env,
-                              check=False, input="3\n127.0.0.1\n9\nsiteuser\n/srv/site\n" + answers + "\n4\n")
+                              check=False, input="3\n127.0.0.1\n9\nsiteuser\n/srv/site\n" + answers + "\n5\n")
         return project, result, (log.read_text() if log.exists() else "")
 
     def test_wizard_configures_github_automatically_without_manual_copy(self):
@@ -604,7 +605,7 @@ exit 0
                                           {"FAKE_GH_FAIL_SECRET": "DEPLOY_USER"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Автонастройка не удалась", result.stdout + result.stderr)
-        self.assertIn("DEPLOY_SSH_KEY — КОПИРУЙТЕ ТОЛЬКО ЖЁЛТЫЙ БЛОК", result.stdout)
+        self.assertIn("▼▼▼ значение (несколько строк): копируйте от первой до последней строки ▼▼▼", result.stdout)
         self.assertTrue((project / ".github/workflows/deploy.yml").exists())
 
     def test_wizard_shows_github_error_and_trims_token(self):
@@ -619,7 +620,7 @@ exit 0
         project, result, log = self.wizard("n\n\n")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("SECRET", log)
-        self.assertIn("DEPLOY_SSH_KEY — КОПИРУЙТЕ ТОЛЬКО ЖЁЛТЫЙ БЛОК", result.stdout)
+        self.assertIn("▼▼▼ значение (несколько строк): копируйте от первой до последней строки ▼▼▼", result.stdout)
 
     def test_github_slug_parsing(self):
         script = (str(SCRIPT))
@@ -657,7 +658,7 @@ exit 0
         cfg.mkdir()
         home = self.root / "home2"
         home.mkdir()
-        func = subprocess.run(["bash", "-c", "sed -n '/^limit_go_threads()/,/^}/p;/^gh_runs()/,/^}/p;/^ensure_gh_cli()/,/^}/p' " + str(SCRIPT)],
+        func = subprocess.run(["bash", "-c", "sed -n '/^t()/,/^}/p;/^limit_go_threads()/,/^}/p;/^gh_runs()/,/^}/p;/^ensure_gh_cli()/,/^}/p' " + str(SCRIPT)],
                               text=True, capture_output=True).stdout
         env = dict(self.env, HOME=str(home), PATH=str(tools) + os.pathsep + "/usr/bin:/bin")
         env.pop("SYNC_REPO_GH_BIN", None)
@@ -666,7 +667,7 @@ exit 0
                               'ensure_gh_cli && echo "BIN=$GH_BIN"', env=env, check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(f"BIN={home}/.local/bin/gh", result.stdout)
-        self.assertIn("не запускается: noexec", result.stderr)
+        self.assertIn("does not start: noexec", result.stderr)
         self.assertFalse((cfg / "bin/gh").exists())
         self.assertEqual(list(cfg.glob(".sync-repo-gh.*")), [])
 
@@ -691,7 +692,7 @@ exit 0
         cfg.mkdir()
         home = self.root / "home3"
         home.mkdir()
-        func = subprocess.run(["bash", "-c", "sed -n '/^limit_go_threads()/,/^}/p;/^gh_runs()/,/^}/p;/^ensure_gh_cli()/,/^}/p' " + str(SCRIPT)],
+        func = subprocess.run(["bash", "-c", "sed -n '/^t()/,/^}/p;/^limit_go_threads()/,/^}/p;/^gh_runs()/,/^}/p;/^ensure_gh_cli()/,/^}/p' " + str(SCRIPT)],
                               text=True, capture_output=True).stdout
         env = dict(self.env, HOME=str(home), PATH=str(tools) + os.pathsep + "/usr/bin:/bin")
         env.pop("SYNC_REPO_GH_BIN", None)
@@ -701,6 +702,82 @@ exit 0
                               'ensure_gh_cli && echo "BIN=$GH_BIN GOMAXPROCS=$GOMAXPROCS"', env=env, check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(f"BIN={cfg}/bin/gh GOMAXPROCS=1", result.stdout)
+
+    # ---- Языки интерфейса ----
+    def lang_env(self, **extra):
+        env = dict(self.env)
+        for key in ("SYNC_REPO_LANG", "SYNC_REPO_LANG_DIR"):
+            env.pop(key, None)
+        env.update(extra)
+        return env
+
+    def test_default_language_is_english(self):
+        project = self.fixture()
+        result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
+                              env=self.lang_env(), check=False, input="5\n")
+        self.assertIn("4) Change language", result.stdout)
+        self.assertIn("Choose an option [5]:", result.stdout)
+        self.assertNotIn("Выберите", result.stdout)
+
+    def test_russian_pack_is_used_when_selected(self):
+        project = self.fixture()
+        (project / ".deploy/sync_repo_from_git.conf").write_text(
+            (project / ".deploy/sync_repo_from_git.conf").read_text() + "SYNC_REPO_LANG=ru\n")
+        lang_dir = Path(self.env["SYNC_REPO_LANG_DIR"])
+        result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
+                              env=self.lang_env(SYNC_REPO_LANG_DIR=str(lang_dir)), check=False, input="5\n")
+        self.assertIn("4) Сменить язык", result.stdout)
+
+    def test_change_language_menu_persists_and_restarts(self):
+        project = self.fixture()
+        lang_dir = Path(self.env["SYNC_REPO_LANG_DIR"])
+        result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
+                              env=self.lang_env(SYNC_REPO_LANG_DIR=str(lang_dir)), check=False,
+                              input="4\n2\n5\n")
+        self.assertIn("Interface language", result.stdout)
+        self.assertIn("4) Сменить язык", result.stdout)  # меню перезапущено на русском
+        self.assertIn("SYNC_REPO_LANG=ru", (project / ".deploy/sync_repo_from_git.conf").read_text())
+
+    def test_unknown_or_unsafe_language_pack_falls_back_to_english(self):
+        project = self.fixture()
+        bad = self.root / "badlang"
+        bad.mkdir()
+        (bad / "ru.sh").write_text("L_m171='$(touch /tmp/pwned_by_pack)'\n")
+        result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
+                              env=self.lang_env(SYNC_REPO_LANG="ru", SYNC_REPO_LANG_DIR=str(bad)),
+                              check=False, input="5\n")
+        self.assertIn("Using English", result.stderr)
+        self.assertIn("1) Yes, update", result.stdout)
+        self.assertFalse(Path("/tmp/pwned_by_pack").exists())
+        result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
+                              env=self.lang_env(SYNC_REPO_LANG="xx"), check=False, input="5\n")
+        self.assertIn("1) Yes, update", result.stdout)
+
+    def test_only_selected_language_pack_is_downloaded(self):
+        project = self.fixture()
+        tools = self.root / "curl_tools"
+        tools.mkdir()
+        log = self.root / "curl.log"
+        lang_dir = Path(self.env["SYNC_REPO_LANG_DIR"])
+        (tools / "curl").write_text(
+            "#!/usr/bin/env bash\nurl=''\nwhile [[ $# -gt 0 ]]; do case $1 in -o) o=$2; shift;; http*) url=$1;; esac; shift; done\n"
+            f"echo \"$url\" >> {log}\n"
+            f"cp {lang_dir}/ru.sh \"$o\"\n")
+        (tools / "curl").chmod(0o755)
+        env = self.lang_env(SYNC_REPO_LANG="ru", SYNC_REPO_AUTO_UPDATE="1",
+                            PATH=str(tools) + os.pathsep + os.environ["PATH"])
+        self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project, env=env, check=False, input="5\n")
+        urls = log.read_text().split()
+        self.assertTrue(any(u.endswith("/.deploy/lang/ru.sh") for u in urls), urls)
+        self.assertFalse(any("/lang/en.sh" in u for u in urls), urls)
+        self.assertTrue((project / ".deploy/lang/ru.sh").is_file())
+
+    def test_secret_blocks_separate_name_from_value(self):
+        project, result, log = self.wizard("n\n", {})
+        out = result.stdout
+        self.assertIn("DEPLOY_HOST  ← type into the Name field".replace("type into the Name field", "впишите в поле Name"), out)
+        self.assertIn("▼▼▼ значение: копируйте только строку ниже, вставьте в поле Secret ▼▼▼", out)
+        self.assertIn("▲▲▲ конец значения ▲▲▲", out)
 
 
 if __name__ == "__main__":
