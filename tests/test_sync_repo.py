@@ -461,7 +461,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.5.0"', 'SCRIPT_VERSION="1.5.1"', 1).replace(
+            'SCRIPT_VERSION="1.5.1"', 'SCRIPT_VERSION="1.5.2"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -478,7 +478,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.0"', 'SCRIPT_VERSION="1.5.1"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.1"', 'SCRIPT_VERSION="1.5.2"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -492,7 +492,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.0"', 'SCRIPT_VERSION="1.5.1"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.1"', 'SCRIPT_VERSION="1.5.2"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("1.5.1", result.stdout)
@@ -501,11 +501,11 @@ class SyncRepoTest(unittest.TestCase):
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.5.0", "1.3.10"):
+        for version in ("1.5.1", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.0"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.1"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -516,7 +516,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.0"', 'SCRIPT_VERSION="1.5.1"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.1"', 'SCRIPT_VERSION="1.5.2"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -539,8 +539,22 @@ echo "gh $* [token=${GH_TOKEN:-}]" >> "$FAKE_GH_LOG"
 case "$1" in
   --version) echo "gh version 0.0.0" ;;
   secret)
+    state="$FAKE_GH_LOG.state"
+    if [[ ! -d "$state" ]]; then
+      mkdir -p "$state"; echo 0 > "$state/_counter"
+      for n in ${FAKE_GH_EXISTING:-}; do echo T0 > "$state/$n"; done
+    fi
+    if [[ "$2" == list ]]; then
+      for a in "$@"; do [[ "$prev" == --jq ]] && jq="$a"; prev="$a"; done
+      name="$(printf '%s' "$jq" | sed -n 's/.*name=="\([A-Z_]*\)".*/\\1/p')"
+      [[ -f "$state/$name" ]] && cat "$state/$name"
+      exit 0
+    fi
     if [[ "${FAKE_GH_FAIL_SECRET:-}" == "$3" ]]; then exit 1; fi
-    echo "SECRET $3 <<$(cat)>>" >> "$FAKE_GH_LOG" ;;
+    echo "SECRET $3 <<$(cat)>>" >> "$FAKE_GH_LOG"
+    if [[ -z "${FAKE_GH_NO_UPDATE:-}" ]]; then
+      n=$(( $(cat "$state/_counter") + 1 )); echo $n > "$state/_counter"; echo "T$n" > "$state/$3"
+    fi ;;
   api)
     if [[ -n "${FAKE_GH_API_ERROR:-}" ]]; then echo "$FAKE_GH_API_ERROR" >&2; exit 1; fi
     for a in "$@"; do
@@ -550,8 +564,10 @@ esac
 exit 0
 """
 
-    def wizard(self, answers, extra_env=None):
+    def wizard(self, answers, extra_env=None, prepare=None):
         project = self.fixture()
+        if prepare:
+            prepare(project)
         self.git(project, "remote", "set-url", "origin", "git@github.com:acme/site.git")
         fake = self.root / "fake_gh"
         fake.write_text(self.FAKE_GH)
@@ -566,7 +582,8 @@ exit 0
             "while [[ $# -gt 0 ]]; do [[ $1 == -f ]] && f=$2; shift; done\n"
             "printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\\nFAKEKEY\\n-----END OPENSSH PRIVATE KEY-----\\n' > \"$f\"\n"
             "echo 'ssh-ed25519 AAAAFAKE test' > \"$f.pub\"\n")
-        (tools / "ssh-keyscan").write_text("#!/usr/bin/env bash\necho '127.0.0.1 ssh-ed25519 AAAAHOST'\n")
+        (tools / "ssh-keyscan").write_text(
+            "#!/usr/bin/env bash\n[[ -n ${FAKE_KEYSCAN_EMPTY:-} ]] || echo '127.0.0.1 ssh-ed25519 AAAAHOST'\n")
         (tools / "ssh").write_text("#!/usr/bin/env bash\nexit 1\n")
         for tool in tools.iterdir():
             tool.chmod(0o755)
@@ -578,6 +595,7 @@ exit 0
         # меню: 3 → хост, порт, пользователь, путь, затем ответы мастера
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project, env=env,
                               check=False, input="3\n127.0.0.1\n9\nsiteuser\n/srv/site\n" + answers + "\n5\n")
+        self.last_home = home
         return project, result, (log.read_text() if log.exists() else "")
 
     def test_wizard_configures_github_automatically_without_manual_copy(self):
@@ -778,6 +796,90 @@ exit 0
         self.assertIn("DEPLOY_HOST  ← type into the Name field".replace("type into the Name field", "впишите в поле Name"), out)
         self.assertIn("▼▼▼ значение: копируйте только строку ниже, вставьте в поле Secret ▼▼▼", out)
         self.assertIn("▲▲▲ конец значения ▲▲▲", out)
+
+    # ---- Запись секретов: всегда перезапись + проверка ----
+    ALL_SECRETS = "DEPLOY_HOST DEPLOY_PORT DEPLOY_USER DEPLOY_PATH DEPLOY_KNOWN_HOSTS DEPLOY_SSH_KEY"
+
+    def test_secrets_are_created_and_reported_with_summary(self):
+        project, result, log = self.wizard("y\nghp_secret_token\n\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in self.ALL_SECRETS.split():
+            self.assertIn(f"✓ {name} — создан", result.stdout)
+        self.assertIn("--app actions", log)
+        self.assertNotIn("--env", log)
+        self.assertNotIn("--org", log)
+
+    def test_existing_secrets_are_overwritten(self):
+        project, result, log = self.wizard("y\nghp_secret_token\n\n",
+                                          {"FAKE_GH_EXISTING": self.ALL_SECRETS})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in self.ALL_SECRETS.split():
+            self.assertIn(f"✓ {name} — перезаписан", result.stdout)
+            self.assertIn("SECRET " + name, log)
+
+    def prepare_existing_key(self, project):
+        (project / ".deploy/github_actions_deploy_key.pub").write_text("ssh-ed25519 AAAAOLD old\n")
+
+    def test_existing_key_without_github_secret_creates_new_key_and_writes_it(self):
+        # Раньше здесь печаталось «ключ уже есть», а DEPLOY_SSH_KEY не записывался.
+        project, result, log = self.wizard("\ny\nghp_secret_token\n\n", prepare=self.prepare_existing_key)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("✓ DEPLOY_SSH_KEY — создан", result.stdout)
+        self.assertIn("SECRET DEPLOY_SSH_KEY <<-----BEGIN OPENSSH PRIVATE KEY-----", log)
+        authorized = (self.last_home / ".ssh/authorized_keys").read_text()
+        self.assertIn("AAAAFAKE", authorized)
+
+    def test_existing_key_with_github_secret_keeps_it(self):
+        project, result, log = self.wizard("\ny\nghp_secret_token\n\n", prepare=self.prepare_existing_key,
+                                          extra_env={"FAKE_GH_EXISTING": "DEPLOY_SSH_KEY"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("SECRET DEPLOY_SSH_KEY", log)
+        self.assertIn("DEPLOY_SSH_KEY уже есть", result.stdout)
+        self.assertIn("✓ DEPLOY_HOST — создан", result.stdout)
+
+    def test_new_key_replaces_old_authorized_keys_entry(self):
+        def prepare(project):
+            self.prepare_existing_key(project)
+        project, result, log = self.wizard("2\ny\nghp_secret_token\n\n", prepare=prepare)
+        authorized = (self.last_home / ".ssh/authorized_keys").read_text()
+        self.assertIn("AAAAFAKE", authorized)
+        self.assertNotIn("AAAAOLD", authorized)
+
+    def test_empty_value_is_refused_and_not_claimed_configured(self):
+        project, result, log = self.wizard("y\nghp_secret_token\n\n", {"FAKE_KEYSCAN_EMPTY": "1"})
+        out = result.stdout + result.stderr
+        self.assertIn("DEPLOY_KNOWN_HOSTS — пустое значение не записывается", out)
+        self.assertNotIn("SECRET DEPLOY_KNOWN_HOSTS", log)
+        self.assertIn("Автонастройка не удалась", out)
+        self.assertNotIn("Автодеплой настроен", out)
+
+    def test_unchanged_update_time_is_reported_as_failure(self):
+        project, result, log = self.wizard("y\nghp_secret_token\n\n",
+                                          {"FAKE_GH_EXISTING": "DEPLOY_HOST", "FAKE_GH_NO_UPDATE": "1"})
+        out = result.stdout + result.stderr
+        self.assertIn("не обновил секрет", out)
+        self.assertNotIn("Автодеплой настроен", out)
+
+    # ---- Хук после деплоя ----
+    def test_post_deploy_hook_runs_and_failure_fails_the_deploy(self):
+        project = self.fixture()
+        (project / ".deploy/post_deploy.sh").write_text("echo HOOK_RAN_IN=$(basename \"$PWD\")\n")
+        result = self.deploy(project)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("HOOK_RAN_IN=project", result.stdout)
+        (project / ".deploy/post_deploy.sh").write_text("echo before; exit 7\n")
+        result = self.deploy(project)
+        self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+        self.assertIn("хук после деплоя", result.stderr)
+
+    def test_prompts_end_with_space_in_english(self):
+        project = self.fixture()
+        env = dict(self.env)
+        for key in ("SYNC_REPO_LANG", "SYNC_REPO_LANG_DIR"):
+            env.pop(key, None)
+        result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project, env=env,
+                              check=False, input="5\n")
+        self.assertIn("Choose an option [5]: ", result.stdout)
 
 
 if __name__ == "__main__":

@@ -171,12 +171,6 @@ L_m082='Проверьте: токен вставлен целиком; Resource
 L_m083='Repository access включает ${slug}; срок действия токена не истёк.'
 # en: Creating secrets in ${slug} ...
 L_m084='Создаю secrets в ${slug} ...'
-# en: Error: could not create secret ${name}.
-L_m085='Ошибка: не удалось создать secret ${name}.'
-# en: Error: could not create secret DEPLOY_SSH_KEY.
-L_m086='Ошибка: не удалось создать secret DEPLOY_SSH_KEY.'
-# en:   • DEPLOY_SSH_KEY left unchanged (the key already exists).
-L_m087='  • DEPLOY_SSH_KEY оставлен прежним (ключ уже существует).'
 # en: Error: could not commit deploy.yml to branch ${branch}.
 L_m088='Ошибка: не удалось закоммитить deploy.yml в ветку ${branch}.'
 # en:   ✓ .github/workflows/deploy.yml committed to ${branch}
@@ -229,8 +223,6 @@ L_m111='Создан файл: ${workflow_file}'
 L_m112='ВНИМАНИЕ: файлы SSH-ключей и sync_repo_from_git.conf нельзя добавлять в Git-репозиторий.'
 # en: Step 1. Create secrets: GitHub → Settings → Secrets and variables → Actions → New repository secret
 L_m113='Шаг 1. Создайте secrets: GitHub → Settings → Secrets and variables → Actions → New repository secret'
-# en: The existing Actions SSH key is kept — the previous secrets can still be used.
-L_m114='Существующий Actions SSH-ключ сохранён — прежние secrets можно использовать.'
 # en: DEPLOY_SSH_KEY cannot be shown again: the private part of the old key was deleted after creation.
 L_m115='DEPLOY_SSH_KEY повторно показать нельзя: приватная часть старого ключа удалена после создания.'
 # en: To get a new DEPLOY_SSH_KEY, choose option 2 the next time you run the wizard.
@@ -445,3 +437,33 @@ L_m219='не определена'
 L_m220='нет коммитов'
 # en: no data
 L_m221='нет данных'
+# en:   ✓ ${name} — created
+L_m222='  ✓ ${name} — создан'
+# en:   ✓ ${name} — overwritten
+L_m223='  ✓ ${name} — перезаписан'
+# en:   ✗ ${name} — refusing to write an empty value.
+L_m224='  ✗ ${name} — пустое значение не записывается.'
+# en:   ✗ ${name} — could not read the secrets list to verify (the token needs Secrets: Read).
+L_m225='  ✗ ${name} — не удалось прочитать список secrets для проверки (токену нужно право Secrets: Read).'
+# en:   ✗ ${name} — written, but not found in the repository Actions secrets afterwards.
+L_m226='  ✗ ${name} — записан, но после этого не найден в Actions secrets репозитория.'
+# en:   ✗ ${name} — GitHub did not update the secret (update time unchanged).
+L_m227='  ✗ ${name} — GitHub не обновил секрет (время изменения не изменилось).'
+# en:   ✗ ${name} — GitHub CLI failed to write the secret.
+L_m228='  ✗ ${name} — GitHub CLI не смог записать секрет.'
+# en: Target: ${slug} → Settings → Secrets and variables → Actions → Repository secrets.
+L_m229='Куда пишем: ${slug} → Settings → Secrets and variables → Actions → Repository secrets.'
+# en: DEPLOY_SSH_KEY is missing in ${slug} and the private part of the old key is not stored on the server. A new key pair will be created.
+L_m230='DEPLOY_SSH_KEY отсутствует в ${slug}, а приватная часть старого ключа на сервере не хранится. Будет создана новая пара ключей.'
+# en:   • DEPLOY_SSH_KEY already exists in ${slug}; its value cannot be read back. To replace it, choose option 2 (create new keys) next time.
+L_m231='  • DEPLOY_SSH_KEY уже есть в ${slug}; его значение прочитать нельзя. Чтобы заменить, в следующий раз выберите пункт 2 (создать новые ключи).'
+# en: Error: ${secrets_failed} secret(s) were not written. Nothing is claimed as configured.
+L_m232='Ошибка: секретов не записано: ${secrets_failed}. Автодеплой не считается настроенным.'
+# en: The private part of the old key is not stored on the server. Choose 1 only if the DEPLOY_SSH_KEY secret already holds a valid key; if unsure, choose 2.
+L_m233='Приватная часть старого ключа на сервере не хранится. Выбирайте 1, только если секрет DEPLOY_SSH_KEY уже содержит рабочий ключ; если не уверены, выбирайте 2.'
+# en: You chose the existing key: DEPLOY_SSH_KEY is NOT shown and NOT written by this run. Make sure it already exists in the repository secrets; otherwise run the wizard again and choose option 2.
+L_m234='Вы выбрали существующий ключ: DEPLOY_SSH_KEY в этом запуске НЕ показывается и НЕ записывается. Убедитесь, что он уже есть в secrets репозитория, иначе запустите мастер снова и выберите пункт 2.'
+# en: Running post-deploy hook .deploy/post_deploy.sh ...
+L_m235='Запускаю хук после деплоя .deploy/post_deploy.sh ...'
+# en: Error: the post-deploy hook failed (exit code ${hook_status}). Files are synchronized, but the post-deploy step did not finish.
+L_m236='Ошибка: хук после деплоя завершился с кодом ${hook_status}. Файлы синхронизированы, но шаг после деплоя не выполнен.'
