@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.4.4"
+SCRIPT_VERSION="1.4.5"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -421,16 +421,20 @@ github_slug_from_url() {
     printf '%s\n' "${slug}"
 }
 
-# gh на shared-хостингах с лимитом потоков падает в Go-рантайме; GOMAXPROCS=1 это лечит.
+# gh на shared-хостингах с лимитом потоков (ulimit -u) падает в Go-рантайме
+# ("failed to create new OS thread"). Ограничиваем потоки ВСЕГДА, а не только после
+# сбоя: `gh --version` проходит и без лимитов, но `gh api`/`gh secret set` уже нет.
+limit_go_threads() {
+    export GOMAXPROCS="${GOMAXPROCS:-1}"
+    export GODEBUG="${GODEBUG:+${GODEBUG},}asyncpreemptoff=1"
+    export GOGC="${GOGC:-50}"
+}
+
 gh_runs() {
     local bin="$1"
 
-    "${bin}" --version >/dev/null 2>&1 && return 0
-    if GOMAXPROCS=1 "${bin}" --version >/dev/null 2>&1; then
-        export GOMAXPROCS=1
-        return 0
-    fi
-    return 1
+    limit_go_threads
+    "${bin}" --version >/dev/null 2>&1
 }
 
 # Находит GitHub CLI или скачивает его в .deploy/bin без root-прав.
