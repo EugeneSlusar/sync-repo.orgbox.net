@@ -625,6 +625,8 @@ exit 0
             workflow = project / ".github/workflows/deploy.yml"
             workflow.parent.mkdir(parents=True)
             workflow.write_text("name: own\n")
+            self.git(project, "config", "user.email", "test@example.invalid")
+            self.git(project, "config", "user.name", "Sync Repo Test")
             self.git(project, "add", ".github/workflows/deploy.yml")
             self.git(project, "commit", "-m", "own workflow")
         project, result, log = self.wizard("y\nghp_secret_token\n\n",
@@ -688,6 +690,9 @@ exit 0
         # gh из .deploy/bin «не запускается» (имитация noexec) — берётся каталог в $HOME
         tools = self.root / "fake_tools"
         tools.mkdir()
+        # на раннере GitHub системный gh уже есть: подменяем его неработающей заглушкой
+        (tools / "gh").write_text("#!/usr/bin/env bash\nexit 127\n")
+        (tools / "gh").chmod(0o755)
         pkg = self.root / "pkg/gh_2.89.0_linux_amd64/bin"
         pkg.mkdir(parents=True)
         (pkg / "gh").write_text(
@@ -722,6 +727,9 @@ exit 0
         # gh «падает» без GOMAXPROCS=1 (лимит потоков хостинга) — скрипт включает его сам
         tools = self.root / "fake_tools2"
         tools.mkdir()
+        # на раннере GitHub системный gh уже есть: подменяем его неработающей заглушкой
+        (tools / "gh").write_text("#!/usr/bin/env bash\nexit 127\n")
+        (tools / "gh").chmod(0o755)
         pkg = self.root / "pkg2/gh_2.89.0_linux_amd64/bin"
         pkg.mkdir(parents=True)
         (pkg / "gh").write_text(
