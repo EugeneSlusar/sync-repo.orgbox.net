@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.5.1"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -48,6 +48,7 @@ SSH_WRAPPER_FILE=""
 UPDATE_TEMP_FILE=""
 ACTIONS_PRIVATE_KEY_TEMP=""
 GH_BIN=""
+GITHUB_SETUP_TOKEN=""
 GH_CLI_VERSION="${SYNC_REPO_GH_VERSION:-2.89.0}"
 TOOL_REPOSITORY_URL="${SYNC_REPO_TOOL_REPOSITORY:-https://github.com/EugeneSlusar/sync-repo.orgbox.net.git}"
 TOOL_REPOSITORY_REF="${SYNC_REPO_TOOL_REF:-main}"
@@ -221,7 +222,7 @@ change_language() {
         index=$((index + 1))
     done
     current_name="$(language_name "${LANGUAGE_CODE}")"
-    read -r -p "$(t m010 "Choose language [${current_name}]:")" choice || return 0
+    read -r -p "$(t m010 "Choose language [${current_name}]: ")" choice || return 0
     [[ -n "${choice}" ]] || return 0
     index=1
     for lang in ${SUPPORTED_LANGUAGES}; do
@@ -292,7 +293,7 @@ update_script_from_central_repository() {
         fi
         echo "$(t m020 "1) Yes, update the script and continue")"
         echo "$(t m021 "2) No, continue with the installed version")"
-        if ! IFS= read -r -p "$(t m022 "Choose an option [2]:")" update_choice; then
+        if ! IFS= read -r -p "$(t m022 "Choose an option [2]: ")" update_choice; then
             update_choice="2"
         fi
         case "${update_choice}" in
@@ -468,7 +469,7 @@ setup_deploy_key() {
     echo "$(t m034 "Add it to GitHub: Repository → Settings → Deploy keys → Add deploy key.")"
     echo "$(t m035 "A key without Allow write access is enough to update the server.")"
     echo
-    read -r -p "$(t m036 "After adding the key, press Enter to continue...")"
+    read -r -p "$(t m036 "After adding the key, press Enter to continue... ")"
 }
 
 request_auth() {
@@ -482,7 +483,7 @@ request_auth() {
     echo "$(t m041 "     repository's Settings → Deploy keys. Choose this for permanent deployment.")"
     echo "$(t m042 "  2) GitHub Personal Access Token (PAT) — a secret token from GitHub Settings → Developer settings.")"
     echo "$(t m043 "  3) Login and password/PAT — legacy method; GitHub.com does not accept regular passwords.")"
-    read -r -p "$(t m044 "Choose an option [1]:")" auth_choice
+    read -r -p "$(t m044 "Choose an option [1]: ")" auth_choice
     auth_choice="${auth_choice:-1}"
 
     case "${auth_choice}" in
@@ -503,8 +504,8 @@ request_auth() {
             ;;
         3)
             AUTH_MODE="basic"
-            read -r -p "$(t m046 "GitHub login:")" AUTH_USERNAME
-            read -r -s -p "$(t m047 "Password or Personal Access Token:")" AUTH_SECRET
+            read -r -p "$(t m046 "GitHub login: ")" AUTH_USERNAME
+            read -r -s -p "$(t m047 "Password or Personal Access Token: ")" AUTH_SECRET
             echo
             SSH_PRIVATE_KEY=""
 
@@ -538,7 +539,7 @@ create_github_repository() {
     echo
     echo "$(t m054 "Creating a GitHub repository from the current project")"
     default_repository_name="$(basename -- "${REPO_DIR}")"
-    read -r -p "$(t m055 "Repository name [${default_repository_name}]:")" repository_name
+    read -r -p "$(t m055 "Repository name [${default_repository_name}]: ")" repository_name
     repository_name="${repository_name:-${default_repository_name}}"
     if [[ ! "${repository_name}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
         echo "$(t m056 "Error: the repository name contains invalid characters.")" >&2
@@ -547,7 +548,7 @@ create_github_repository() {
 
     echo "$(t m057 "1) Private repository")"
     echo "$(t m058 "2) Public repository")"
-    read -r -p "$(t m059 "Repository visibility [1]:")" visibility
+    read -r -p "$(t m059 "Repository visibility [1]: ")" visibility
     case "${visibility}" in
         2) repository_visibility="--public" ;;
         *) repository_visibility="--private" ;;
@@ -668,6 +669,61 @@ ensure_gh_cli() {
     return 1
 }
 
+# updatedAt секрета в Actions-secrets репозитория (пусто, если секрета нет).
+# Возвращает ненулевой код, если список прочитать не удалось.
+# Использует token и slug вызывающей функции.
+github_secret_updated_at() {
+    GH_TOKEN="${token}" "${GH_BIN}" secret list --repo "${slug}" --app actions \
+        --json name,updatedAt --jq ".[] | select(.name==\"$1\") | .updatedAt"
+}
+
+# Всегда ПЕРЕЗАПИСЫВАЕТ секрет в Repository secrets (Actions) и проверяет результат:
+# пустое значение не пишется, после записи секрет должен быть в списке и обновиться.
+# Аргументы: имя, вид значения (value|file), значение или путь к файлу.
+set_github_secret() {
+    local name="$1" kind="$2" source_value="$3" before after
+    local -a gh_args=(secret set "$1" --repo "${slug}" --app actions)
+
+    if [[ "${kind}" == file ]]; then
+        grep -q '[^[:space:]]' -- "${source_value}" 2>/dev/null || {
+            echo "$(t m224 "  ✗ ${name} — refusing to write an empty value.")" >&2
+            return 1
+        }
+    else
+        [[ -n "${source_value//[[:space:]]/}" ]] || {
+            echo "$(t m224 "  ✗ ${name} — refusing to write an empty value.")" >&2
+            return 1
+        }
+    fi
+    if ! before="$(github_secret_updated_at "${name}")"; then
+        echo "$(t m225 "  ✗ ${name} — could not read the secrets list to verify (the token needs Secrets: Read).")" >&2
+        return 1
+    fi
+    if [[ "${kind}" == file ]]; then
+        GH_TOKEN="${token}" "${GH_BIN}" "${gh_args[@]}" < "${source_value}" >/dev/null || {
+            echo "$(t m228 "  ✗ ${name} — GitHub CLI failed to write the secret.")" >&2
+            return 1
+        }
+    else
+        printf '%s' "${source_value}" | GH_TOKEN="${token}" "${GH_BIN}" "${gh_args[@]}" >/dev/null || {
+            echo "$(t m228 "  ✗ ${name} — GitHub CLI failed to write the secret.")" >&2
+            return 1
+        }
+    fi
+    if ! after="$(github_secret_updated_at "${name}")" || [[ -z "${after}" ]]; then
+        echo "$(t m226 "  ✗ ${name} — written, but not found in the repository Actions secrets afterwards.")" >&2
+        return 1
+    fi
+    if [[ -z "${before}" ]]; then
+        echo "$(t m222 "  ✓ ${name} — created")"
+    elif [[ "${after}" != "${before}" ]]; then
+        echo "$(t m223 "  ✓ ${name} — overwritten")"
+    else
+        echo "$(t m227 "  ✗ ${name} — GitHub did not update the secret (update time unchanged).")" >&2
+        return 1
+    fi
+}
+
 # Создаёт секреты и коммитит deploy.yml в GitHub через API. Токен нигде не сохраняется.
 # Аргументы: host port user path known_hosts private_key_file(или пусто) workflow_file
 configure_github_automatically() {
@@ -679,24 +735,25 @@ configure_github_automatically() {
     remote_url="$(cd -- "${REPO_DIR}" && git_remote_url "${REMOTE:-origin}" 2>/dev/null || true)"
     slug="$(github_slug_from_url "${remote_url:-${REPOSITORY_URL}}" 2>/dev/null || true)"
     if [[ -z "${slug}" ]]; then
-        read -r -p "$(t m074 "GitHub repository (owner/name):")" slug || return 1
+        read -r -p "$(t m074 "GitHub repository (owner/name): ")" slug || return 1
         [[ "${slug}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "$(t m075 "Invalid repository format.")" >&2; return 1; }
     fi
     branch="${BRANCH:-main}"
 
     ensure_gh_cli || return 1
 
-    token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    token="${GH_TOKEN:-${GITHUB_TOKEN:-${GITHUB_SETUP_TOKEN:-}}}"
     if [[ -z "${token}" ]]; then
         echo
         echo "$(t m076 "A GitHub token is needed only for this setup (it is not saved to any file).")"
         echo "$(t m077 "Create a fine-grained token: https://github.com/settings/personal-access-tokens/new")"
         echo "  • Repository access: Only select repositories → ${slug}"
         echo "  • Permissions: Secrets — Read and write; Contents — Read and write; Workflows — Read and write"
-        read -r -s -p "$(t m078 "GitHub token:")" token || return 1
+        read -r -s -p "$(t m078 "GitHub token: ")" token || return 1
         echo
     fi
     token="${token//[[:space:]]/}"
+    GITHUB_SETUP_TOKEN="${token}"
     [[ -n "${token}" ]] || { echo "$(t m079 "Token not provided.")" >&2; return 1; }
 
     local api_error
@@ -710,7 +767,21 @@ configure_github_automatically() {
     fi
 
     echo "$(t m084 "Creating secrets in ${slug} ...")"
-    local name value
+    echo "$(t m229 "Target: ${slug} → Settings → Secrets and variables → Actions → Repository secrets.")"
+    local name value secrets_failed=0
+    if [[ -z "${private_key_file}" ]]; then
+        # Приватная часть прежнего ключа на сервере не хранится: писать нечего.
+        # Если секрета в GitHub нет, просим вызывающую функцию создать новый ключ.
+        local existing_key_time
+        if ! existing_key_time="$(github_secret_updated_at DEPLOY_SSH_KEY)"; then
+            echo "$(t m225 "  ✗ DEPLOY_SSH_KEY — could not read the secrets list to verify (the token needs Secrets: Read).")" >&2
+            return 1
+        fi
+        if [[ -z "${existing_key_time}" ]]; then
+            print_warning "$(t m230 "DEPLOY_SSH_KEY is missing in ${slug} and the private part of the old key is not stored on the server. A new key pair will be created.")"
+            return 3
+        fi
+    fi
     for name in DEPLOY_HOST DEPLOY_PORT DEPLOY_USER DEPLOY_PATH DEPLOY_KNOWN_HOSTS; do
         case "${name}" in
             DEPLOY_HOST) value="${deploy_host}" ;;
@@ -719,20 +790,16 @@ configure_github_automatically() {
             DEPLOY_PATH) value="${deploy_path}" ;;
             DEPLOY_KNOWN_HOSTS) value="${known_hosts}" ;;
         esac
-        if ! printf '%s' "${value}" | GH_TOKEN="${token}" "${GH_BIN}" secret set "${name}" --repo "${slug}" >/dev/null; then
-            echo "$(t m085 "Error: could not create secret ${name}.")" >&2
-            return 1
-        fi
-        echo "  ✓ ${name}"
+        set_github_secret "${name}" value "${value}" || secrets_failed=$((secrets_failed + 1))
     done
     if [[ -n "${private_key_file}" ]]; then
-        if ! GH_TOKEN="${token}" "${GH_BIN}" secret set DEPLOY_SSH_KEY --repo "${slug}" < "${private_key_file}" >/dev/null; then
-            echo "$(t m086 "Error: could not create secret DEPLOY_SSH_KEY.")" >&2
-            return 1
-        fi
-        echo "  ✓ DEPLOY_SSH_KEY"
+        set_github_secret DEPLOY_SSH_KEY file "${private_key_file}" || secrets_failed=$((secrets_failed + 1))
     else
-        echo "$(t m087 "  • DEPLOY_SSH_KEY left unchanged (the key already exists).")"
+        echo "$(t m231 "  • DEPLOY_SSH_KEY already exists in ${slug}; its value cannot be read back. To replace it, choose option 2 (create new keys) next time.")"
+    fi
+    if (( secrets_failed > 0 )); then
+        echo "$(t m232 "Error: ${secrets_failed} secret(s) were not written. Nothing is claimed as configured.")" >&2
+        return 1
     fi
 
     api_path="repos/${slug}/contents/.github/workflows/deploy.yml"
@@ -754,6 +821,47 @@ configure_github_automatically() {
     return 0
 }
 
+# Создаёт новую пару ключей для Actions и устанавливает публичную часть в authorized_keys.
+# Старые строки этого проекта (тот же комментарий) заменяются: иначе новый ключ не получит доступ.
+# Использует переменные setup_actions_autodeploy: actions_key, actions_public, deploy_host.
+create_actions_key() {
+    local comment="github-actions:${deploy_host}:${REPO_DIR}" key_material tmp_keys
+
+    ACTIONS_PRIVATE_KEY_TEMP="$(mktemp "${TMPDIR:-/tmp}/github-actions-key.XXXXXX")"
+    rm -f -- "${ACTIONS_PRIVATE_KEY_TEMP}"
+    actions_key="${ACTIONS_PRIVATE_KEY_TEMP}"
+    ssh-keygen -q -t ed25519 -C "${comment}" -f "${actions_key}" -N ""
+    cp -- "${actions_key}.pub" "${actions_public}"
+    chmod 644 "${actions_public}"
+    existing_actions_key=false
+
+    mkdir -p -- "${HOME}/.ssh"
+    chmod 700 "${HOME}/.ssh"
+    touch "${HOME}/.ssh/authorized_keys"
+    chmod 600 "${HOME}/.ssh/authorized_keys"
+    key_material="$(awk '{print $2}' "${actions_public}")"
+    if ! grep -Fq -- "${key_material}" "${HOME}/.ssh/authorized_keys"; then
+        tmp_keys="$(mktemp "${HOME}/.ssh/.authorized_keys.XXXXXX")"
+        grep -vF -- "${comment}" "${HOME}/.ssh/authorized_keys" > "${tmp_keys}" || true
+        cat "${actions_public}" >> "${tmp_keys}"
+        chmod 600 "${tmp_keys}"
+        mv -f -- "${tmp_keys}" "${HOME}/.ssh/authorized_keys"
+    fi
+}
+
+# Итог проверки SSH для сообщения мастера. Использует переменные setup_actions_autodeploy.
+actions_ssh_result() {
+    if [[ "${existing_actions_key}" == true ]]; then
+        t m102 "key already configured"
+    elif ssh -i "${actions_key}" -p "${deploy_port}" \
+        -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+        "${deploy_user}@${deploy_host}" "printf connected" >/dev/null 2>&1; then
+        t m103 "connection successful"
+    else
+        t m104 "check failed; key added to authorized_keys"
+    fi
+}
+
 setup_actions_autodeploy() {
     local deploy_host deploy_port deploy_user deploy_path workflow_file
     local actions_key actions_public known_hosts ssh_result existing_actions_key
@@ -766,14 +874,14 @@ setup_actions_autodeploy() {
     echo
     echo "$(t m091 "Auto-deploy setup via GitHub Actions → SSH")"
     default_host="$(hostname -f 2>/dev/null || hostname)"
-    read -r -p "$(t m092 "SSH host [${default_host}]:")" deploy_host
+    read -r -p "$(t m092 "SSH host [${default_host}]: ")" deploy_host
     deploy_host="${deploy_host:-${default_host}}"
-    read -r -p "$(t m093 "SSH port [22]:")" deploy_port
+    read -r -p "$(t m093 "SSH port [22]: ")" deploy_port
     deploy_port="${deploy_port:-22}"
     default_user="${USER:-$(whoami)}"
-    read -r -p "$(t m094 "SSH user [${default_user}]:")" deploy_user
+    read -r -p "$(t m094 "SSH user [${default_user}]: ")" deploy_user
     deploy_user="${deploy_user:-${default_user}}"
-    read -r -p "$(t m095 "Project path [${REPO_DIR}]:")" deploy_path
+    read -r -p "$(t m095 "Project path [${REPO_DIR}]: ")" deploy_path
     deploy_path="${deploy_path:-${REPO_DIR}}"
 
     if [[ ! "${deploy_port}" =~ ^[0-9]+$ ]]; then
@@ -787,27 +895,17 @@ setup_actions_autodeploy() {
         echo "$(t m097 "An existing Actions SSH key was found.")"
         echo "$(t m098 "1) Use the existing key")"
         echo "$(t m099 "2) Create new keys")"
-        read -r -p "$(t m044 "Choose an option [1]:")" key_choice
+        print_hint "$(t m233 "The private part of the old key is not stored on the server. Choose 1 only if the DEPLOY_SSH_KEY secret already holds a valid key; if unsure, choose 2.")"
+        read -r -p "$(t m044 "Choose an option [1]: ")" key_choice
         if [[ "${key_choice}" != "2" ]]; then
             existing_actions_key=true
             echo "$(t m100 "The existing key will be used.")"
         fi
     fi
     if [[ "${existing_actions_key}" == false ]]; then
-        ACTIONS_PRIVATE_KEY_TEMP="$(mktemp "${TMPDIR:-/tmp}/github-actions-key.XXXXXX")"
-        rm -f -- "${ACTIONS_PRIVATE_KEY_TEMP}"
-        actions_key="${ACTIONS_PRIVATE_KEY_TEMP}"
-        ssh-keygen -q -t ed25519 -C "github-actions:${deploy_host}:${REPO_DIR}" -f "${actions_key}" -N ""
-        cp -- "${actions_key}.pub" "${actions_public}"
-        chmod 644 "${actions_public}"
-    fi
-
-    mkdir -p -- "${HOME}/.ssh"
-    chmod 700 "${HOME}/.ssh"
-    touch "${HOME}/.ssh/authorized_keys"
-    chmod 600 "${HOME}/.ssh/authorized_keys"
-    if [[ "${existing_actions_key}" == false ]] && ! grep -Fq "github-actions:${deploy_host}:${REPO_DIR}" "${HOME}/.ssh/authorized_keys"; then
-        cat "${actions_public}" >> "${HOME}/.ssh/authorized_keys"
+        create_actions_key
+    else
+        install -d -m 700 "${HOME}/.ssh"
     fi
 
     known_hosts="$(ssh-keyscan -p "${deploy_port}" -T 10 "${deploy_host}" 2>/dev/null || true)"
@@ -815,16 +913,7 @@ setup_actions_autodeploy() {
         echo "$(t m101 "Warning: could not get the SSH fingerprint for ${deploy_host}.")" >&2
     fi
 
-    ssh_result="$(t m102 "key already configured")"
-    if [[ "${existing_actions_key}" == true ]]; then
-        ssh_result="$(t m102 "key already configured")"
-    elif ssh -i "${actions_key}" -p "${deploy_port}" \
-        -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
-        "${deploy_user}@${deploy_host}" "printf connected" >/dev/null 2>&1; then
-        ssh_result="$(t m103 "connection successful")"
-    else
-        ssh_result="$(t m104 "check failed; key added to authorized_keys")"
-    fi
+    ssh_result="$(actions_ssh_result)"
 
     workflow_file="${REPO_DIR}/.github/workflows/deploy.yml"
     mkdir -p -- "$(dirname -- "${workflow_file}")"
@@ -902,10 +991,21 @@ WORKFLOW
     if [[ "${AUTO_MODE}" == false ]]; then
         local auto_answer=""
         echo
-        read -r -p "$(t m105 "Configure GitHub automatically (secrets and workflow via GitHub CLI)? [Y/n]:")" auto_answer || auto_answer="n"
+        read -r -p "$(t m105 "Configure GitHub automatically (secrets and workflow via GitHub CLI)? [Y/n]: ")" auto_answer || auto_answer="n"
         if [[ ! "${auto_answer}" =~ ^[NnНн] ]]; then
-            if configure_github_automatically "${deploy_host}" "${deploy_port}" "${deploy_user}" \
-                "${deploy_path}" "${known_hosts}" "${actions_key:-}" "${workflow_file}"; then
+            local setup_status=0
+            configure_github_automatically "${deploy_host}" "${deploy_port}" "${deploy_user}" \
+                "${deploy_path}" "${known_hosts}" "${actions_key:-}" "${workflow_file}" || setup_status=$?
+            if [[ "${setup_status}" == 3 ]]; then
+                # Секрета DEPLOY_SSH_KEY в GitHub нет, а приватной части старого ключа тоже нет.
+                create_actions_key
+                ssh_result="$(actions_ssh_result)"
+                setup_status=0
+                configure_github_automatically "${deploy_host}" "${deploy_port}" "${deploy_user}" \
+                    "${deploy_path}" "${known_hosts}" "${actions_key:-}" "${workflow_file}" || setup_status=$?
+            fi
+            GITHUB_SETUP_TOKEN=""
+            if [[ "${setup_status}" == 0 ]]; then
                 if [[ "${existing_actions_key}" == false ]]; then
                     rm -f -- "${actions_key}" "${actions_key}.pub"
                     ACTIONS_PRIVATE_KEY_TEMP=""
@@ -913,7 +1013,7 @@ WORKFLOW
                 echo
                 echo "$(t m106 "Auto-deploy configured: secrets and workflow created in GitHub.")"
                 echo "$(t m107 "The next push to ${BRANCH:-main} will deploy to ${deploy_host}.")"
-                read -r -p "$(t m108 "Press Enter to return to the menu...")" || true
+                read -r -p "$(t m108 "Press Enter to return to the menu... ")" || true
                 return 0
             fi
             print_warning "$(t m109 "Automatic setup failed — showing manual setup instructions.")"
@@ -936,7 +1036,7 @@ WORKFLOW
         print_secret DEPLOY_SSH_KEY "$(cat "${actions_key}")" multiline
         print_secret DEPLOY_KNOWN_HOSTS "${known_hosts}" multiline
     else
-        print_hint "$(t m114 "The existing Actions SSH key is kept — the previous secrets can still be used.")"
+        print_warning "$(t m234 "You chose the existing key: DEPLOY_SSH_KEY is NOT shown and NOT written by this run. Make sure it already exists in the repository secrets; otherwise run the wizard again and choose option 2.")"
         print_secret DEPLOY_HOST "${deploy_host}"
         print_secret DEPLOY_PORT "${deploy_port}"
         print_secret DEPLOY_USER "${deploy_user}"
@@ -964,7 +1064,7 @@ WORKFLOW
         rm -f -- "${actions_key}"
         ACTIONS_PRIVATE_KEY_TEMP=""
     fi
-    read -r -p "$(t m108 "Press Enter to return to the menu...")"
+    read -r -p "$(t m108 "Press Enter to return to the menu... ")"
 }
 
 prepare_askpass() {
@@ -1072,7 +1172,7 @@ if [[ -z "${REPOSITORY_URL}" ]] && [[ "${LOCAL_REMOTE_CONFIGURED}" == false ]] &
     echo "$(t m136 "The project is not connected to a remote Git repository yet.")"
     echo "$(t m137 "1) Connect an existing repository")"
     echo "$(t m138 "2) Create a new GitHub repository")"
-    read -r -p "$(t m044 "Choose an option [1]:")" setup_choice
+    read -r -p "$(t m044 "Choose an option [1]: ")" setup_choice
     case "${setup_choice}" in
         2)
             create_github_repository
@@ -1094,7 +1194,7 @@ if [[ -z "${REMOTE}" ]]; then
     echo "$(t m140 "The Git remote name is a short local name for a Git connection, not a URL.")"
     echo "$(t m141 "Usually the value is origin. If you paste a URL here by mistake,")"
     echo "$(t m142 "the script will detect it and use origin as the connection name.")"
-    read -r -p "$(t m143 "Git remote name [origin]:")" REMOTE
+    read -r -p "$(t m143 "Git remote name [origin]: ")" REMOTE
     REMOTE="${REMOTE:-origin}"
     if [[ "${REMOTE}" == *"://"* ]] || [[ "${REMOTE}" == git@*:* ]]; then
         REPOSITORY_URL="${REMOTE}"
@@ -1128,10 +1228,10 @@ if [[ -z "${REPOSITORY_URL}" ]]; then
     echo "$(t m146 "Example: https://github.com/user/project.git")"
     echo "         git@github.com:user/project.git"
     if [[ -n "${DETECTED_REPOSITORY_URL}" ]]; then
-        read -r -p "$(t m147 "Git repository URL [${DETECTED_REPOSITORY_URL}]:")" REPOSITORY_URL
+        read -r -p "$(t m147 "Git repository URL [${DETECTED_REPOSITORY_URL}]: ")" REPOSITORY_URL
         REPOSITORY_URL="${REPOSITORY_URL:-${DETECTED_REPOSITORY_URL}}"
     else
-        read -r -p "$(t m148 "Git repository URL:")" REPOSITORY_URL
+        read -r -p "$(t m148 "Git repository URL: ")" REPOSITORY_URL
     fi
 fi
 if [[ -z "${REPOSITORY_URL}" ]]; then
@@ -1151,7 +1251,7 @@ if [[ -z "${BRANCH}" ]]; then
     echo
     echo "$(t m151 "The branch is the line of development to copy to the server.")"
     echo "$(t m152 "The main stable code usually lives in main (sometimes master).")"
-    read -r -p "$(t m153 "Branch [${DEFAULT_BRANCH}]:")" BRANCH
+    read -r -p "$(t m153 "Branch [${DEFAULT_BRANCH}]: ")" BRANCH
     BRANCH="${BRANCH:-${DEFAULT_BRANCH}}"
 fi
 
@@ -1211,7 +1311,7 @@ if [[ "${AUTO_MODE}" == false ]]; then
         echo "$(t m173 "3) Set up auto-deploy via GitHub Actions")"
         echo "$(t m174 "4) Change language")"
         echo "$(t m175 "5) Cancel")"
-        printf "$(t m176 "Choose an option [5]:")"
+        printf "$(t m176 "Choose an option [5]: ")"
         IFS= read -r CONFIRM
         printf '\n'
         case "${CONFIRM}" in
@@ -1220,7 +1320,7 @@ if [[ "${AUTO_MODE}" == false ]]; then
                 ;;
             2)
                 show_sync_status
-                read -r -p "$(t m108 "Press Enter to return to the menu...")"
+                read -r -p "$(t m108 "Press Enter to return to the menu... ")"
                 ;;
             3)
                 setup_actions_autodeploy
@@ -1306,7 +1406,7 @@ if ! git show-ref --verify --quiet "refs/remotes/${REMOTE}/${BRANCH}"; then
     fi
     if [[ -n "${REMOTE_DEFAULT_BRANCH}" ]] && [[ "${REMOTE_DEFAULT_BRANCH}" != "${BRANCH}" ]]; then
         echo "$(t m191 "Branch ${REMOTE}/${BRANCH} not found; GitHub reports ${REMOTE_DEFAULT_BRANCH} as the default branch.")"
-        read -r -p "$(t m192 "Use ${REMOTE_DEFAULT_BRANCH}? [Y/n]:")" USE_DEFAULT_BRANCH
+        read -r -p "$(t m192 "Use ${REMOTE_DEFAULT_BRANCH}? [Y/n]: ")" USE_DEFAULT_BRANCH
         if [[ "${USE_DEFAULT_BRANCH}" != "n" ]] && [[ "${USE_DEFAULT_BRANCH}" != "N" ]]; then
             BRANCH="${REMOTE_DEFAULT_BRANCH}"
             save_config
@@ -1354,7 +1454,7 @@ if ! git diff --quiet --ignore-submodules=none -- \
     echo "$(t m202 "Replace these edits with the ${REMOTE}/${BRANCH} version?")"
     echo "$(t m203 "1) Yes, back up the edits and restore from the repository")"
     echo "$(t m204 "2) No, keep the edits and cancel the update")"
-    if ! IFS= read -r -p "$(t m022 "Choose an option [2]:")" RESTORE_CHOICE; then
+    if ! IFS= read -r -p "$(t m022 "Choose an option [2]: ")" RESTORE_CHOICE; then
         echo "$(t m205 "No confirmation received. Edits kept, update cancelled.")"
         exit 0
     fi
@@ -1409,6 +1509,20 @@ if [[ "${GIT_CLEAN:-0}" == "1" ]]; then
     echo "$(t m216 "GIT_CLEAN=1 ignored: mass cleaning is disabled in version ${SCRIPT_VERSION}.")"
 fi
 printf '%s%s%s\n' "${C_VALUE}" "$(t m217 "✓ Your local files (keys, config, uploads) are untouched. Nothing to do.")" "${C_RESET}"
+
+# Необязательный шаг после синхронизации: .deploy/post_deploy.sh из репозитория проекта
+# (например, миграции БД). Запускается из корня проекта; ненулевой код завершает скрипт
+# с ошибкой. Скрипт сам ничего не печатает из секретов; хук тоже не должен их печатать.
+POST_DEPLOY_HOOK="${REPO_DIR}/.deploy/post_deploy.sh"
+if [[ -f "${POST_DEPLOY_HOOK}" && "${SYNC_REPO_SKIP_HOOK:-0}" != "1" ]]; then
+    echo "$(t m235 "Running post-deploy hook .deploy/post_deploy.sh ...")"
+    hook_status=0
+    (cd -- "${REPO_DIR}" && bash "${POST_DEPLOY_HOOK}") || hook_status=$?
+    if [[ "${hook_status}" != 0 ]]; then
+        echo "$(t m236 "Error: the post-deploy hook failed (exit code ${hook_status}). Files are synchronized, but the post-deploy step did not finish.")" >&2
+        exit "${hook_status}"
+    fi
+fi
 
 echo "$(t m218 "Done: the server is synchronized with ${REMOTE}/${BRANCH}.")"
 git --no-pager log -1 --oneline
