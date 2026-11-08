@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.5.2"
+SCRIPT_VERSION="1.5.3"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -322,6 +322,40 @@ update_script_from_central_repository() {
 
 update_script_from_central_repository "$@"
 
+# Закрывает от веб-доступа каталоги, которые скрипт создаёт внутри сайта:
+# .deploy (ключи, конфиг) и .git. Файл .htaccess лежит внутри этих каталогов и в Git проекта
+# не попадает; корень проекта (.env, server/) скрипт не трогает: его защищает .htaccess проекта.
+HTACCESS_DENY_ALL='# Created by sync_repo_from_git.sh: this directory must never be served over the web.
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+</IfModule>'
+
+protect_directory_from_web() {
+    local dir="$1" file="$1/.htaccess"
+
+    [[ -d "${dir}" && -w "${dir}" ]] || return 0
+    if [[ -f "${file}" ]] && [[ "$(cat -- "${file}")" == "${HTACCESS_DENY_ALL}" ]]; then
+        return 0
+    fi
+    printf '%s\n' "${HTACCESS_DENY_ALL}" > "${file}" 2>/dev/null || return 0
+    print_hint "$(t m238 "Web access to ${dir} is blocked with .htaccess.")"
+}
+
+protect_sensitive_directories() {
+    local git_dir
+
+    protect_directory_from_web "${PROJECT_CONFIG_DIR}"
+    git_dir="$(cd -- "${REPO_DIR}" 2>/dev/null && git rev-parse --git-dir 2>/dev/null || true)"
+    if [[ -n "${git_dir}" ]]; then
+        [[ "${git_dir}" == /* ]] || git_dir="${REPO_DIR}/${git_dir}"
+        protect_directory_from_web "${git_dir}"
+    fi
+}
+
 ensure_local_files_are_excluded() {
     local exclude_file exclude_pattern protected_file relative_path
 
@@ -347,7 +381,8 @@ ensure_local_files_are_excluded() {
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key.pub" \
         "${PROJECT_CONFIG_DIR}/github_actions_deploy_key.pub" \
         "${PROJECT_CONFIG_DIR}/github_actions_deploy.workflow.yml" \
-        "${PROJECT_CONFIG_DIR}/lang/*"; do
+        "${PROJECT_CONFIG_DIR}/lang/*" \
+        "${PROJECT_CONFIG_DIR}/.htaccess"; do
         [[ "${protected_file}" == "${REPO_DIR}/"* ]] || continue
         # В репозитории инструмента языковые пакеты отслеживаются Git.
         if [[ "${protected_file}" == */lang/'*' ]] && is_tool_repository; then continue; fi
@@ -1274,6 +1309,7 @@ save_config
 if [[ "${GIT_IS_CONFIGURED}" == true ]]; then
     ensure_local_files_are_excluded
 fi
+protect_sensitive_directories
 case "${AUTH_MODE}" in
     ssh) AUTH_DESCRIPTION="SSH Deploy Key" ;;
     token) AUTH_DESCRIPTION="GitHub Personal Access Token" ;;
