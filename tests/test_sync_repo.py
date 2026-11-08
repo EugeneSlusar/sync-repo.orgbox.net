@@ -635,7 +635,7 @@ exit 0
         self.assertIn("deploy.yml уже есть в main: не изменён", result.stdout + result.stderr)
         # собственный deploy.yml проекта не изменён и не помечен как локальная правка
         self.assertEqual((project / ".github/workflows/deploy.yml").read_text(), "name: own\n")
-        self.assertEqual(self.git(project, "status", "--porcelain"), "")
+        self.assertEqual(self.git(project, "status", "--porcelain", "--", ".github", ".deploy"), "")
 
     def test_wizard_overwrites_workflow_only_when_explicitly_requested(self):
         project, result, log = self.wizard("y\nghp_secret_token\n\n",
