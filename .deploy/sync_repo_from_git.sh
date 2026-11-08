@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.4.6"
+SCRIPT_VERSION="1.4.7"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -1008,7 +1008,7 @@ echo
 # Карточка настроек: заголовок поля и под ним значение другим цветом.
 # Без рамки, поэтому длинные пути не «разъезжаются» при переносе строк.
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-    C_LABEL=$'\033[1;36m'; C_VALUE=$'\033[0;32m'; C_RESET=$'\033[0m'
+    C_LABEL=$'\033[1;36m'; C_VALUE=$'\033[1;38;5;208m'; C_RESET=$'\033[0m'
 else
     C_LABEL=""; C_VALUE=""; C_RESET=""
 fi
