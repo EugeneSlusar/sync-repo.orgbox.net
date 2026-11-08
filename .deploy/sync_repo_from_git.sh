@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.4.5"
+SCRIPT_VERSION="1.4.6"
 AUTO_MODE=false
 
 case "${1:-}" in
@@ -1005,21 +1005,24 @@ esac
 
 echo "Настройки сохранены в ${CONFIG_FILE}."
 echo
-TABLE_LABEL_RULE=""
-TABLE_VALUE_RULE=""
-printf -v TABLE_LABEL_RULE '%*s' 15 ''
-printf -v TABLE_VALUE_RULE '%*s' 92 ''
-TABLE_LABEL_RULE="${TABLE_LABEL_RULE// /─}"
-TABLE_VALUE_RULE="${TABLE_VALUE_RULE// /─}"
-printf '┌%s┬%s┐\n' "${TABLE_LABEL_RULE}" "${TABLE_VALUE_RULE}"
-printf '│ %s │ %-90s │\n' "Репозиторий  " "${REPO_DIR}"
-printf '│ %s │ %-90s │\n' "Git remote   " "${REMOTE}"
-printf '│ %s │ %-90s │\n' "Источник     " "${REPOSITORY_URL}"
-printf '│ %s │ %-90s │\n' "Ветка        " "${BRANCH}"
-printf '│ %s │ %-90s │\n' "Авторизация  " "${AUTH_DESCRIPTION}"
-printf '│ %s │ %-90s │\n' "Конфигурация " "${CONFIG_FILE}"
-printf '│ %s │ %-90s │\n' "Версия       " "${SCRIPT_VERSION}"
-printf '└%s┴%s┘\n' "${TABLE_LABEL_RULE}" "${TABLE_VALUE_RULE}"
+# Карточка настроек: заголовок поля и под ним значение другим цветом.
+# Без рамки, поэтому длинные пути не «разъезжаются» при переносе строк.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    C_LABEL=$'\033[1;36m'; C_VALUE=$'\033[0;32m'; C_RESET=$'\033[0m'
+else
+    C_LABEL=""; C_VALUE=""; C_RESET=""
+fi
+print_field() {
+    printf '%s%s%s\n    %s%s%s\n' "${C_LABEL}" "$1" "${C_RESET}" "${C_VALUE}" "$2" "${C_RESET}"
+}
+print_field "Репозиторий (папка на сервере)" "${REPO_DIR}"
+print_field "Git remote" "${REMOTE}"
+print_field "Источник (откуда берём код)" "${REPOSITORY_URL}"
+print_field "Ветка" "${BRANCH}"
+print_field "Авторизация" "${AUTH_DESCRIPTION}"
+print_field "Файл настроек" "${CONFIG_FILE}"
+print_field "Версия скрипта" "${SCRIPT_VERSION}"
+echo
 if [[ "${GIT_IS_CONFIGURED}" == true ]]; then
     echo "Git:          уже настроен"
 else
@@ -1237,7 +1240,7 @@ git branch --set-upstream-to="${REMOTE}/${BRANCH}" "${BRANCH}" >/dev/null
 if [[ "${GIT_CLEAN:-0}" == "1" ]]; then
     echo "GIT_CLEAN=1 проигнорирован: общая очистка отключена в версии ${SCRIPT_VERSION}."
 fi
-echo "Локальные неотслеживаемые файлы сохранены. Общая очистка не выполнялась."
+printf '\033[32m%s\033[0m\n' "✓ Ваши локальные файлы (ключи, конфиг, загрузки) не тронуты. Ничего делать не нужно."
 
 echo "Готово: сервер синхронизирован с ${REMOTE}/${BRANCH}."
 git --no-pager log -1 --oneline

@@ -11,7 +11,7 @@
 
 Настройки и секреты сохраняются локально и не должны добавляться в Git.
 
-В версии `1.4.5` (автонастройка появилась в `1.4.0`) пункт `3) Настроить автодеплой через GitHub Actions` настраивает GitHub
+В версии `1.4.6` (автонастройка появилась в `1.4.0`) пункт `3) Настроить автодеплой через GitHub Actions` настраивает GitHub
 автоматически: мастер сам скачивает GitHub CLI (`gh`) в `.deploy/bin` без root-прав,
 создаёт все secrets (`DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH`,
 `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`) и коммитит `.github/workflows/deploy.yml`
