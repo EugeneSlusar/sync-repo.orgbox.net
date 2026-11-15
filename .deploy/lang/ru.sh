@@ -491,3 +491,5 @@ L_m247='Ошибка: для --auth token нужна переменная окр
 L_m248='Ошибка: для этого способа авторизации нужен URL репозитория вида https://.'
 # en: Branch ${BRANCH} not found; installing the default branch ${REMOTE_DEFAULT_BRANCH}.
 L_m250='Ветка ${BRANCH} не найдена; устанавливается основная ветка ${REMOTE_DEFAULT_BRANCH}.'
+# en: The repository is probably private or the address is wrong: GitHub asks for a login. Delete ${CONFIG_FILE} and run the setup again, choosing a Deploy Key or a token.
+L_m251='Репозиторий, вероятно, приватный или адрес неверный: GitHub просит логин. Удалите ${CONFIG_FILE} и запустите настройку заново, выбрав Deploy Key или токен.'
