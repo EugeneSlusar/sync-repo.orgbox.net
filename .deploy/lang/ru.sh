@@ -471,3 +471,23 @@ L_m236='Ошибка: хук после деплоя завершился с к�
 L_m237='  • .github/workflows/deploy.yml уже есть в ${branch}: не изменён, записаны только secrets. Чтобы заменить файл, задайте SYNC_REPO_OVERWRITE_WORKFLOW=1.'
 # en: Web access to ${dir} is blocked with .htaccess.
 L_m238='Веб-доступ к ${dir} закрыт файлом .htaccess.'
+# en: Error: --install needs --repo <url>, for example --repo https://github.com/user/site.git
+L_m239='Ошибка: для --install нужен --repo <url>, например --repo https://github.com/user/site.git'
+# en: Add the public key above to GitHub (Repository → Settings → Deploy keys → Add deploy key), then run the same command again.
+L_m240='Добавьте публичный ключ выше в GitHub (Repository → Settings → Deploy keys → Add deploy key) и запустите ту же команду ещё раз.'
+# en: Public repository (no authentication)
+L_m241='Публичный репозиторий (без авторизации)'
+# en: Existing files that conflict with the repository were moved to ${backup_dir}.
+L_m242='Существующие файлы, конфликтующие с репозиторием, перенесены в ${backup_dir}.'
+# en: Error: these files already exist and are not part of the repository:
+L_m243='Ошибка: эти файлы уже существуют и не входят в репозиторий:'
+# en: Remove them, or add --replace-existing to move them to a backup folder.
+L_m244='Удалите их или добавьте --replace-existing, чтобы перенести их в папку резервных копий.'
+# en: Installed. To update later, run: bash .deploy/sync_repo_from_git.sh --auto
+L_m245='Установлено. Для обновления позже запустите: bash .deploy/sync_repo_from_git.sh --auto'
+# en: Error: --auth token needs the SYNC_REPO_TOKEN environment variable.
+L_m247='Ошибка: для --auth token нужна переменная окружения SYNC_REPO_TOKEN.'
+# en: Error: this authentication mode needs an https:// repository URL.
+L_m248='Ошибка: для этого способа авторизации нужен URL репозитория вида https://.'
+# en: Branch ${BRANCH} not found; installing the default branch ${REMOTE_DEFAULT_BRANCH}.
+L_m250='Ветка ${BRANCH} не найдена; устанавливается основная ветка ${REMOTE_DEFAULT_BRANCH}.'

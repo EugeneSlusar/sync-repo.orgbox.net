@@ -461,7 +461,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.5.3"', 'SCRIPT_VERSION="1.5.4"', 1).replace(
+            'SCRIPT_VERSION="1.6.0"', 'SCRIPT_VERSION="1.6.1"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -478,7 +478,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.3"', 'SCRIPT_VERSION="1.5.4"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.6.0"', 'SCRIPT_VERSION="1.6.1"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -492,20 +492,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.3"', 'SCRIPT_VERSION="1.5.4"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.6.0"', 'SCRIPT_VERSION="1.6.1"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.5.3", result.stdout)
+        self.assertIn("1.6.0", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.5.3", "1.3.10"):
+        for version in ("1.6.0", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.3"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.6.0"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -516,7 +516,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.5.3"', 'SCRIPT_VERSION="1.5.4"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.6.0"', 'SCRIPT_VERSION="1.6.1"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -931,6 +931,106 @@ exit 0
         again = self.deploy(project)
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         self.assertNotIn(".htaccess", again.stdout)
+
+    # ---- Установка одной командой: --install ----
+    def install(self, project, *args, env=None):
+        env = dict(env or self.env)
+        for key in ("SYNC_REPO_LANG", "SYNC_REPO_LANG_DIR"):
+            env.pop(key, None)  # проверяем английский интерфейс по умолчанию
+        return self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", "--install", *args,
+                            cwd=project, env=env, check=False, input="")
+
+    def empty_site(self, name="site"):
+        project = self.root / name
+        (project / ".deploy").mkdir(parents=True)
+        shutil.copy2(SCRIPT, project / ".deploy/sync_repo_from_git.sh")
+        return project
+
+    def test_install_public_repository_without_any_prompt(self):
+        project = self.empty_site()
+        result = self.install(project, "--repo", str(self.remote), "--branch", "main")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
+        config = (project / ".deploy/sync_repo_from_git.conf").read_text()
+        self.assertIn("AUTH_MODE=none", config)
+        self.assertIn("Installed. To update later", result.stdout)
+        # дальше обычное обновление по сохранённым настройкам
+        again = self.deploy(project)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+
+    def test_install_uses_default_branch_when_branch_not_given(self):
+        bare = self.root / "master_only.git"
+        self.run_cmd("git", "init", "--bare", str(bare))
+        self.git(self.source, "push", str(bare), "main:master")
+        project = self.empty_site("site2")
+        result = self.install(project, "--repo", str(bare))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("BRANCH=master", (project / ".deploy/sync_repo_from_git.conf").read_text())
+        self.assertIn("installing the default branch master", result.stdout)
+
+    def test_install_explicit_missing_branch_fails(self):
+        project = self.empty_site("site3")
+        result = self.install(project, "--repo", str(self.remote), "--branch", "nope")
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_install_refuses_to_overwrite_hosting_default_files(self):
+        project = self.empty_site("site4")
+        target = project / "public_html/include/app.php"
+        target.parent.mkdir(parents=True)
+        target.write_text("hosting default\n")
+        result = self.install(project, "--repo", str(self.remote), "--branch", "main")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("public_html/include/app.php", result.stderr)
+        self.assertEqual(target.read_text(), "hosting default\n")
+
+    def test_install_replace_existing_moves_files_to_backup(self):
+        project = self.empty_site("site5")
+        target = project / "public_html/include/app.php"
+        target.parent.mkdir(parents=True)
+        target.write_text("hosting default\n")
+        result = self.install(project, "--repo", str(self.remote), "--branch", "main", "--replace-existing")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(target.read_text(), "new\n")
+        backups = list((project / ".deploy").glob("backup-*/public_html/include/app.php"))
+        self.assertEqual([b.read_text() for b in backups], ["hosting default\n"])
+        self.assertEqual(self.git(project, "status", "--porcelain", "--", ".deploy"), "")
+
+    def test_install_requires_repo_and_rejects_unknown_options(self):
+        project = self.empty_site("site6")
+        result = self.install(project)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--install needs --repo", result.stderr)
+        result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", "--bogus", cwd=project,
+                              env=self.env, check=False)
+        self.assertEqual(result.returncode, 2)
+
+    def test_install_over_ssh_creates_key_and_asks_to_add_it_then_rerun(self):
+        project = self.empty_site("site7")
+        tools = self.root / "ssh_tools"
+        tools.mkdir()
+        (tools / "ssh").write_text("#!/usr/bin/env bash\nexit 255\n")
+        (tools / "ssh-keygen").write_text(
+            "#!/usr/bin/env bash\n"
+            "while [[ $# -gt 0 ]]; do [[ $1 == -f ]] && f=$2; shift; done\n"
+            "printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\\nFAKEKEY\\n-----END OPENSSH PRIVATE KEY-----\\n' > \"$f\"\n"
+            "echo 'ssh-ed25519 AAAAFAKE deploy' > \"$f.pub\"\n")
+        for tool in tools.iterdir():
+            tool.chmod(0o755)
+        env = dict(self.env, PATH=str(tools) + os.pathsep + self.env["PATH"])
+        result = self.install(project, "--repo", "git@github.com:acme/site.git", "--branch", "main", env=env)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertTrue((project / ".deploy/sync_repo_deploy_key.pub").is_file())
+        self.assertIn("ssh-ed25519", result.stdout)
+        self.assertIn("run the same command again", result.stdout)
+        self.assertNotIn("PRIVATE KEY", result.stdout + result.stderr)
+
+    def test_install_token_is_saved_but_never_printed(self):
+        project = self.empty_site("site8")
+        env = dict(self.env, SYNC_REPO_TOKEN="tok_secret_value")
+        result = self.install(project, "--repo", "https://127.0.0.1:1/acme/site.git", env=env)
+        self.assertNotEqual(result.returncode, 0)  # сети нет: fetch падает, но настройки уже сохранены
+        self.assertIn("AUTH_MODE=token", (project / ".deploy/sync_repo_from_git.conf").read_text())
+        self.assertNotIn("tok_secret_value", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

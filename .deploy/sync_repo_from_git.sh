@@ -6,18 +6,60 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.5.3"
+SCRIPT_VERSION="1.6.0"
 AUTO_MODE=false
+INSTALL_MODE=false
+ARG_REPO=""
+ARG_BRANCH=""
+ARG_REMOTE=""
+ARG_AUTH=""
+ARG_REPLACE_EXISTING=false
+# Исходные аргументы нужны самообновлению: после замены файла скрипт перезапускается с ними.
+ORIGINAL_ARGS=("$@")
 
-case "${1:-}" in
-    --version|-v)
-        echo "sync_repo_from_git.sh ${SCRIPT_VERSION}"
-        exit 0
-        ;;
-    --auto)
-        AUTO_MODE=true
-        ;;
-esac
+usage() {
+    cat <<'USAGE'
+Usage: sync_repo_from_git.sh [options]
+  (no options)           interactive menu
+  --auto                 non-interactive update using the saved settings
+  --install              non-interactive installation of a repository into this folder
+    --repo URL           repository URL (https://... or git@host:owner/name.git)
+    --branch NAME        branch (default: saved one, then main/master)
+    --remote NAME        Git remote name (default: origin)
+    --auth MODE          none | token | ssh (default: chosen from the URL; token from SYNC_REPO_TOKEN)
+    --replace-existing   move files that conflict with the repository to a backup folder
+  --version, -v          print the version
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --version|-v)
+            echo "sync_repo_from_git.sh ${SCRIPT_VERSION}"
+            exit 0
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --auto) AUTO_MODE=true ;;
+        --install) INSTALL_MODE=true; AUTO_MODE=true ;;
+        --repo) ARG_REPO="${2:-}"; shift ;;
+        --branch) ARG_BRANCH="${2:-}"; shift ;;
+        --remote) ARG_REMOTE="${2:-}"; shift ;;
+        --auth) ARG_AUTH="${2:-}"; shift ;;
+        --replace-existing) ARG_REPLACE_EXISTING=true ;;
+        *)
+            echo "Error: unknown option: $1 (see --help)" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+if [[ "${AUTO_MODE}" == true ]]; then
+    # Без терминала Git не должен ждать ввода логина и пароля.
+    export GIT_TERMINAL_PROMPT=0
+fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_FILE="${SCRIPT_DIR}/$(basename -- "${BASH_SOURCE[0]}")"
@@ -320,7 +362,7 @@ update_script_from_central_repository() {
     fi
 }
 
-update_script_from_central_repository "$@"
+update_script_from_central_repository ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 
 # Закрывает от веб-доступа каталоги, которые скрипт создаёт внутри сайта:
 # .deploy (ключи, конфиг) и .git. Файл .htaccess лежит внутри этих каталогов и в Git проекта
@@ -382,6 +424,7 @@ ensure_local_files_are_excluded() {
         "${PROJECT_CONFIG_DIR}/github_actions_deploy_key.pub" \
         "${PROJECT_CONFIG_DIR}/github_actions_deploy.workflow.yml" \
         "${PROJECT_CONFIG_DIR}/lang/*" \
+        "${PROJECT_CONFIG_DIR}/backup-*" \
         "${PROJECT_CONFIG_DIR}/.htaccess"; do
         [[ "${protected_file}" == "${REPO_DIR}/"* ]] || continue
         # В репозитории инструмента языковые пакеты отслеживаются Git.
@@ -416,6 +459,10 @@ load_config() {
 }
 
 auth_config_is_valid() {
+    if [[ "${AUTH_MODE}" == "none" ]]; then
+        return 0
+    fi
+
     if [[ "${AUTH_MODE}" == "ssh" ]] && [[ -n "${SSH_PRIVATE_KEY}" ]]; then
         resolve_ssh_private_key
         [[ -f "${SSH_PRIVATE_KEY_PATH}" ]]
@@ -505,7 +552,126 @@ setup_deploy_key() {
     echo "$(t m034 "Add it to GitHub: Repository → Settings → Deploy keys → Add deploy key.")"
     echo "$(t m035 "A key without Allow write access is enough to update the server.")"
     echo
+    if [[ "${INSTALL_MODE}" == true ]]; then
+        return 0
+    fi
     read -r -p "$(t m036 "After adding the key, press Enter to continue... ")"
+}
+
+# Проверяет, что сервер уже получил доступ по SSH-ключу (без вопросов и без ожидания).
+probe_ssh_access() {
+    resolve_ssh_private_key
+    prepare_ssh_wrapper
+    (
+        export SYNC_SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY_PATH}"
+        export GIT_SSH="${SSH_WRAPPER_FILE}"
+        unset GIT_SSH_COMMAND
+        git ls-remote --exit-code "${REPOSITORY_URL}" HEAD >/dev/null 2>&1
+    )
+}
+
+# Параметры --install: репозиторий, ветка, remote и способ доступа задаются аргументами.
+apply_install_options() {
+    local mode="${ARG_AUTH}"
+
+    if [[ -z "${ARG_REPO}" && -z "${REPOSITORY_URL}" ]]; then
+        echo "$(t m239 "Error: --install needs --repo <url>, for example --repo https://github.com/user/site.git")" >&2
+        exit 2
+    fi
+    [[ -z "${ARG_REPO}" ]] || REPOSITORY_URL="${ARG_REPO}"
+    [[ -z "${ARG_REMOTE}" ]] || REMOTE="${ARG_REMOTE}"
+    BRANCH_EXPLICIT=false
+    if [[ -n "${ARG_BRANCH}" ]]; then
+        BRANCH="${ARG_BRANCH}"
+        BRANCH_EXPLICIT=true
+    elif [[ -z "${BRANCH}" ]]; then
+        BRANCH="main"
+    else
+        BRANCH_EXPLICIT=true
+    fi
+
+    if [[ -z "${mode}" ]]; then
+        if [[ -n "${SYNC_REPO_TOKEN:-}" ]]; then
+            mode="token"
+        elif [[ -z "${ARG_REPO}" ]] && auth_config_is_valid; then
+            mode="keep"
+        elif [[ "${REPOSITORY_URL}" == git@* || "${REPOSITORY_URL}" == ssh://* ]]; then
+            mode="ssh"
+        else
+            mode="none"
+        fi
+    fi
+
+    case "${mode}" in
+        keep) ;;
+        none|token)
+            if [[ "${REPOSITORY_URL}" == git@* || "${REPOSITORY_URL}" == ssh://* ]]; then
+                echo "$(t m248 "Error: this authentication mode needs an https:// repository URL.")" >&2
+                exit 2
+            fi
+            if [[ "${mode}" == token ]]; then
+                if [[ -z "${SYNC_REPO_TOKEN:-}" ]]; then
+                    echo "$(t m247 "Error: --auth token needs the SYNC_REPO_TOKEN environment variable.")" >&2
+                    exit 2
+                fi
+                AUTH_MODE="token"
+                AUTH_USERNAME="x-access-token"
+                AUTH_SECRET="${SYNC_REPO_TOKEN}"
+            else
+                AUTH_MODE="none"
+                AUTH_USERNAME=""
+                AUTH_SECRET=""
+            fi
+            SSH_PRIVATE_KEY=""
+            ;;
+        ssh)
+            setup_deploy_key
+            if ! probe_ssh_access; then
+                echo "$(t m240 "Add the public key above to GitHub (Repository → Settings → Deploy keys → Add deploy key), then run the same command again.")"
+                exit 3
+            fi
+            ;;
+        *)
+            echo "$(t m050 "Error: unknown authentication method.")" >&2
+            exit 2
+            ;;
+    esac
+}
+
+# Файлы хостинга по умолчанию (index.html и т.п.) не должны молча затираться установкой.
+handle_existing_files() {
+    local path backup_dir="" moved=0 shown=0
+    local -a conflicts=()
+
+    while IFS= read -r -d '' path; do
+        [[ -n "${SCRIPT_RELATIVE_PATH}" && "${path}" == "${SCRIPT_RELATIVE_PATH}" ]] && continue
+        [[ -e "${REPO_DIR}/${path}" ]] || continue
+        if git ls-files --error-unmatch -- "${path}" >/dev/null 2>&1; then
+            continue
+        fi
+        conflicts+=("${path}")
+    done < <(git ls-tree -r -z --name-only "${REMOTE}/${BRANCH}")
+
+    (( ${#conflicts[@]} > 0 )) || return 0
+
+    if [[ "${ARG_REPLACE_EXISTING}" != true ]]; then
+        echo "$(t m243 "Error: these files already exist and are not part of the repository:")" >&2
+        for path in "${conflicts[@]}"; do
+            echo "  ${path}" >&2
+            shown=$((shown + 1))
+            if (( shown >= 20 )); then echo "  ..." >&2; break; fi
+        done
+        echo "$(t m244 "Remove them, or add --replace-existing to move them to a backup folder.")" >&2
+        exit 1
+    fi
+
+    backup_dir="${PROJECT_CONFIG_DIR}/backup-$(date +%Y%m%d-%H%M%S)"
+    for path in "${conflicts[@]}"; do
+        mkdir -p -- "${backup_dir}/$(dirname -- "${path}")"
+        mv -- "${REPO_DIR}/${path}" "${backup_dir}/${path}"
+        moved=$((moved + 1))
+    done
+    echo "$(t m242 "Existing files that conflict with the repository were moved to ${backup_dir}.")"
 }
 
 request_auth() {
@@ -1195,6 +1361,11 @@ if [[ -z "${REMOTE}" ]]; then
     REMOTE="${GIT_REMOTE:-origin}"
 fi
 
+BRANCH_EXPLICIT=true
+if [[ "${INSTALL_MODE}" == true ]]; then
+    apply_install_options
+fi
+
 if [[ "${AUTO_MODE}" == true ]]; then
     if [[ -z "${REPOSITORY_URL}" ]] || [[ -z "${BRANCH}" ]] || ! auth_config_is_valid; then
         echo "$(t m134 "Error: --auto mode needs valid repository settings, but they are missing or invalid.")" >&2
@@ -1314,6 +1485,7 @@ case "${AUTH_MODE}" in
     ssh) AUTH_DESCRIPTION="SSH Deploy Key" ;;
     token) AUTH_DESCRIPTION="GitHub Personal Access Token" ;;
     basic) AUTH_DESCRIPTION="$(t m155 "Login and password/PAT")" ;;
+    none) AUTH_DESCRIPTION="$(t m241 "Public repository (no authentication)")" ;;
     *) AUTH_DESCRIPTION="$(t m156 "not configured")" ;;
 esac
 
@@ -1398,7 +1570,7 @@ fi
 
 if [[ "${AUTH_MODE}" == "ssh" ]]; then
     echo "$(t m182 "Using SSH Deploy Key ${SSH_PRIVATE_KEY}.")"
-elif [[ "${REPOSITORY_URL}" == https://* ]]; then
+elif [[ "${REPOSITORY_URL}" == https://* && "${AUTH_MODE}" != "none" ]]; then
     echo "$(t m183 "Using credentials from ${CONFIG_FILE}.")"
     prepare_askpass
 fi
@@ -1418,7 +1590,7 @@ if [[ "${AUTH_MODE}" == "ssh" ]]; then
         echo "$(t m186 "Check the Deploy Key in GitHub, the settings in ${CONFIG_FILE} and repository permissions.")" >&2
         exit 1
     fi
-elif [[ "${REPOSITORY_URL}" == https://* ]]; then
+elif [[ "${REPOSITORY_URL}" == https://* && "${AUTH_MODE}" != "none" ]]; then
     if ! SYNC_GIT_USERNAME="${AUTH_USERNAME}" \
         SYNC_GIT_PASSWORD="${AUTH_SECRET}" \
         GIT_ASKPASS="${ASKPASS_FILE}" \
@@ -1448,11 +1620,17 @@ if ! git show-ref --verify --quiet "refs/remotes/${REMOTE}/${BRANCH}"; then
         done
     fi
     if [[ -n "${REMOTE_DEFAULT_BRANCH}" ]] && [[ "${REMOTE_DEFAULT_BRANCH}" != "${BRANCH}" ]]; then
+        if [[ "${INSTALL_MODE}" == true && "${BRANCH_EXPLICIT}" == false ]]; then
+            echo "$(t m250 "Branch ${BRANCH} not found; installing the default branch ${REMOTE_DEFAULT_BRANCH}.")"
+            BRANCH="${REMOTE_DEFAULT_BRANCH}"
+            save_config
+        else
         echo "$(t m191 "Branch ${REMOTE}/${BRANCH} not found; GitHub reports ${REMOTE_DEFAULT_BRANCH} as the default branch.")"
         read -r -p "$(t m192 "Use ${REMOTE_DEFAULT_BRANCH}? [Y/n]: ")" USE_DEFAULT_BRANCH
         if [[ "${USE_DEFAULT_BRANCH}" != "n" ]] && [[ "${USE_DEFAULT_BRANCH}" != "N" ]]; then
             BRANCH="${REMOTE_DEFAULT_BRANCH}"
             save_config
+        fi
         fi
     fi
 fi
@@ -1539,6 +1717,10 @@ if ! git diff --quiet --ignore-submodules=none -- \
     fi
 fi
 
+if [[ "${INSTALL_MODE}" == true ]]; then
+    handle_existing_files
+fi
+
 echo "$(t m213 "Syncing the working copy...")"
 # Git normally overwrites ignored files at incoming tracked paths. Disable that.
 if ! git checkout --no-overwrite-ignore -B "${BRANCH}" "${REMOTE}/${BRANCH}"; then
@@ -1568,6 +1750,9 @@ if [[ -f "${POST_DEPLOY_HOOK}" && "${SYNC_REPO_SKIP_HOOK:-0}" != "1" ]]; then
 fi
 
 echo "$(t m218 "Done: the server is synchronized with ${REMOTE}/${BRANCH}.")"
+if [[ "${INSTALL_MODE}" == true ]]; then
+    print_hint "$(t m245 "Installed. To update later, run: bash .deploy/sync_repo_from_git.sh --auto")"
+fi
 git --no-pager log -1 --oneline
 
 
