@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.7.1"
+SCRIPT_VERSION="1.7.2"
 AUTO_MODE=false
 INSTALL_MODE=false
 ARG_REPO=""
@@ -1689,6 +1689,14 @@ if ! git show-ref --verify --quiet "refs/remotes/${REMOTE}/${BRANCH}"; then
                 break
             fi
         done
+    fi
+    if [[ -z "${REMOTE_DEFAULT_BRANCH}" ]]; then
+        # Единственная ветка репозитория (например, claude/...) и есть основная.
+        only_branches="$(git for-each-ref --format='%(refname:short)' "refs/remotes/${REMOTE}/" 2>/dev/null \
+            | sed "s#^${REMOTE}/##" | grep -v '^HEAD$' || true)"
+        if [[ -n "${only_branches}" && "$(printf '%s\n' "${only_branches}" | wc -l)" -eq 1 ]]; then
+            REMOTE_DEFAULT_BRANCH="${only_branches}"
+        fi
     fi
     if [[ -n "${REMOTE_DEFAULT_BRANCH}" ]] && [[ "${REMOTE_DEFAULT_BRANCH}" != "${BRANCH}" ]]; then
         if [[ "${INSTALL_MODE}" == true && "${BRANCH_EXPLICIT}" == false ]]; then
