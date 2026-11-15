@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.6.2"
+SCRIPT_VERSION="1.6.3"
 AUTO_MODE=false
 INSTALL_MODE=false
 ARG_REPO=""
@@ -1620,6 +1620,12 @@ elif [[ "${REPOSITORY_URL}" == https://* && "${AUTH_MODE}" != "none" ]]; then
         echo "$(t m187 "Error: could not fetch data from GitHub.")" >&2
         echo "$(t m188 "Check the settings in ${CONFIG_FILE}, internet access and repository permissions.")" >&2
         echo "$(t m189 "To reconfigure, delete ${CONFIG_FILE}.")" >&2
+        exit 1
+    fi
+elif [[ "${AUTH_MODE}" == "none" ]]; then
+    if ! GIT_TERMINAL_PROMPT=0 fetch_repository; then
+        echo "$(t m187 "Error: could not fetch data from GitHub.")" >&2
+        echo "$(t m251 "The repository is probably private or the address is wrong: GitHub asks for a login. Delete ${CONFIG_FILE} and run the setup again, choosing a Deploy Key or a token.")" >&2
         exit 1
     fi
 elif ! fetch_repository; then
