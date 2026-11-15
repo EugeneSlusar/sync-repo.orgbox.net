@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="1.6.1"
 AUTO_MODE=false
 INSTALL_MODE=false
 ARG_REPO=""
@@ -1115,6 +1115,17 @@ setup_actions_autodeploy() {
     fi
 
     known_hosts="$(ssh-keyscan -p "${deploy_port}" -T 10 "${deploy_host}" 2>/dev/null || true)"
+    if [[ -z "${known_hosts}" ]]; then
+        # Хостинг часто не пускает исходящие подключения к собственному имени:
+        # пробуем адрес этого же сервера и подставляем настоящее имя хоста.
+        local known_name="${deploy_host}" scan_target
+        [[ "${deploy_port}" != "22" ]] && known_name="[${deploy_host}]:${deploy_port}"
+        for scan_target in 127.0.0.1 localhost; do
+            known_hosts="$(ssh-keyscan -p "${deploy_port}" -T 10 "${scan_target}" 2>/dev/null \
+                | awk -v n="${known_name}" '!/^#/ && NF >= 3 { $1 = n; print }' || true)"
+            [[ -n "${known_hosts}" ]] && break
+        done
+    fi
     if [[ -z "${known_hosts}" ]]; then
         echo "$(t m101 "Warning: could not get the SSH fingerprint for ${deploy_host}.")" >&2
     fi
