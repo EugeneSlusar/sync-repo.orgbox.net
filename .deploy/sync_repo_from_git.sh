@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.7.0"
+SCRIPT_VERSION="1.7.1"
 AUTO_MODE=false
 INSTALL_MODE=false
 ARG_REPO=""
@@ -1708,6 +1708,14 @@ fi
 
 if ! git show-ref --verify --quiet "refs/remotes/${REMOTE}/${BRANCH}"; then
     echo "$(t m193 "Error: branch ${REMOTE}/${BRANCH} not found.")" >&2
+    remote_branches="$(git for-each-ref --format='%(refname:short)' "refs/remotes/${REMOTE}/" 2>/dev/null \
+        | sed "s#^${REMOTE}/##" | grep -v '^HEAD$' | tr '\n' ' ' || true)"
+    if [[ -n "${remote_branches}" ]]; then
+        echo "$(t m256 "Branches available in the repository: ${remote_branches}")" >&2
+        echo "$(t m257 "Set the right one as BRANCH in ${CONFIG_FILE} and run the script again.")" >&2
+    else
+        echo "$(t m258 "The repository has no branches: it is probably empty. Push the first commit to GitHub, then run the script again.")" >&2
+    fi
     echo "$(t m194 "Check the branch name in the config ${CONFIG_FILE}.")" >&2
     exit 1
 fi
