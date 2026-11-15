@@ -501,3 +501,10 @@ L_m253='  ✓ Deploy Key уже добавлен в ${slug}.'
 L_m254='Не удалось добавить Deploy Key в ${slug}: ${out}'
 # en:   ✓ The Deploy Key (read-only) was added to ${slug}: ${title}
 L_m255='  ✓ Deploy Key (только чтение) добавлен в ${slug}: ${title}'
+
+# en: Branches available in the repository: ${remote_branches}
+L_m256='Ветки в репозитории: ${remote_branches}'
+# en: Set the right one as BRANCH in ${CONFIG_FILE} and run the script again.
+L_m257='Укажите нужную в BRANCH в ${CONFIG_FILE} и запустите скрипт снова.'
+# en: The repository has no branches: it is probably empty. Push the first commit to GitHub, then run the script again.
+L_m258='В репозитории нет веток: он, вероятно, пустой. Отправьте первый коммит в GitHub и запустите скрипт снова.'
