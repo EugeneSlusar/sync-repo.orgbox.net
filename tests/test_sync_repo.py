@@ -461,7 +461,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.6.3"', 'SCRIPT_VERSION="1.6.4"', 1).replace(
+            'SCRIPT_VERSION="1.7.0"', 'SCRIPT_VERSION="1.7.1"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -478,7 +478,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.6.3"', 'SCRIPT_VERSION="1.6.4"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.0"', 'SCRIPT_VERSION="1.7.1"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -492,20 +492,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.6.3"', 'SCRIPT_VERSION="1.6.4"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.0"', 'SCRIPT_VERSION="1.7.1"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.6.3", result.stdout)
+        self.assertIn("1.7.0", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.6.3", "1.3.10"):
+        for version in ("1.7.0", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.6.3"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.0"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -516,7 +516,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.6.3"', 'SCRIPT_VERSION="1.6.4"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.0"', 'SCRIPT_VERSION="1.7.1"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -560,6 +560,10 @@ case "$1" in
     for a in "$@"; do
       if [[ "$a" == "PUT" ]]; then echo "PUT $*" >> "$FAKE_GH_LOG"; put=1; fi
     done
+    if [[ "$*" == *"/keys"* ]]; then
+      if [[ "$*" == *POST* ]]; then echo "POST $*" >> "$FAKE_GH_LOG"; else echo "${FAKE_GH_KEYS:-}"; fi
+      exit 0
+    fi
     if [[ -z "${put:-}" && -n "${FAKE_GH_EXISTING_WORKFLOW:-}" && "$*" == *contents/.github/workflows/deploy.yml* ]]; then echo abc123sha; fi ;;
 esac
 exit 0
@@ -890,6 +894,21 @@ exit 0
         self.assertNotIn("SECRET DEPLOY_KNOWN_HOSTS", log)
         self.assertIn("Автонастройка не удалась", out)
         self.assertNotIn("Автодеплой настроен", out)
+
+    def test_wizard_adds_server_deploy_key_to_github(self):
+        def prepare(project):
+            key = project / ".deploy" / "sync_repo_deploy_key"
+            key.write_text("PRIVATE")
+            Path(str(key) + ".pub").write_text("ssh-ed25519 AAAADEPLOYKEY server\n")
+            conf = project / ".deploy" / "sync_repo_from_git.conf"
+            text = conf.read_text() if conf.exists() else ""
+            conf.write_text(text + "AUTH_MODE=ssh\nSSH_PRIVATE_KEY=sync_repo_deploy_key\n")
+        project, result, log = self.wizard("y\nghp_secret_token\n\n", prepare=prepare)
+        out = result.stdout + result.stderr
+        self.assertIn("POST", log)
+        self.assertIn("repos/acme/site/keys", log)
+        self.assertIn("read_only=true", log)
+        self.assertIn("Deploy Key", out)
 
     def test_fingerprint_falls_back_to_local_scan(self):
         project, result, log = self.wizard("y\nghp_secret_token\n\n", {"FAKE_KEYSCAN_LOCAL_ONLY": "1"})

@@ -493,3 +493,11 @@ L_m248='Ошибка: для этого способа авторизации н
 L_m250='Ветка ${BRANCH} не найдена; устанавливается основная ветка ${REMOTE_DEFAULT_BRANCH}.'
 # en: The repository is probably private or the address is wrong: GitHub asks for a login. Delete ${CONFIG_FILE} and run the setup again, choosing a Deploy Key or a token.
 L_m251='Репозиторий, вероятно, приватный или адрес неверный: GitHub просит логин. Удалите ${CONFIG_FILE} и запустите настройку заново, выбрав Deploy Key или токен.'
+# en: Could not check Deploy Keys in ${slug} (the token needs Administration: Read and write). Add the key manually: Settings → Deploy keys.
+L_m252='Не удалось проверить Deploy Keys в ${slug} (токену нужно право Administration: Read and write). Добавьте ключ вручную: Settings → Deploy keys.'
+# en:   ✓ The Deploy Key is already added to ${slug}.
+L_m253='  ✓ Deploy Key уже добавлен в ${slug}.'
+# en: Could not add the Deploy Key to ${slug}: ${out}
+L_m254='Не удалось добавить Deploy Key в ${slug}: ${out}'
+# en:   ✓ The Deploy Key (read-only) was added to ${slug}: ${title}
+L_m255='  ✓ Deploy Key (только чтение) добавлен в ${slug}: ${title}'
