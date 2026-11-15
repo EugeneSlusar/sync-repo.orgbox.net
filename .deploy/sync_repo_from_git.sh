@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.6.1"
+SCRIPT_VERSION="1.6.2"
 AUTO_MODE=false
 INSTALL_MODE=false
 ARG_REPO=""
@@ -1061,6 +1061,7 @@ actions_ssh_result() {
         t m102 "key already configured"
     elif ssh -i "${actions_key}" -p "${deploy_port}" \
         -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+        -o ConnectTimeout=10 \
         "${deploy_user}@${deploy_host}" "printf connected" >/dev/null 2>&1; then
         t m103 "connection successful"
     else
@@ -1121,9 +1122,17 @@ setup_actions_autodeploy() {
         local known_name="${deploy_host}" scan_target
         [[ "${deploy_port}" != "22" ]] && known_name="[${deploy_host}]:${deploy_port}"
         for scan_target in 127.0.0.1 localhost; do
-            known_hosts="$(ssh-keyscan -p "${deploy_port}" -T 10 "${scan_target}" 2>/dev/null \
+            known_hosts="$(ssh-keyscan -p "${deploy_port}" -T 5 "${scan_target}" 2>/dev/null \
                 | awk -v n="${known_name}" '!/^#/ && NF >= 3 { $1 = n; print }' || true)"
             [[ -n "${known_hosts}" ]] && break
+        done
+    fi
+    if [[ -z "${known_hosts}" ]]; then
+        # Последний шанс: публичные ключи хоста, если их можно прочитать на сервере.
+        local host_pub
+        for host_pub in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_rsa_key.pub; do
+            [[ -r "${host_pub}" ]] || continue
+            known_hosts="${known_hosts}${known_hosts:+$'\n'}$(awk -v n="${known_name}" 'NF >= 2 { print n, $1, $2 }' "${host_pub}")"
         done
     fi
     if [[ -z "${known_hosts}" ]]; then
