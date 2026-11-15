@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.6.3"
+SCRIPT_VERSION="1.7.0"
 AUTO_MODE=false
 INSTALL_MODE=false
 ARG_REPO=""
@@ -559,6 +559,36 @@ setup_deploy_key() {
 }
 
 # Проверяет, что сервер уже получил доступ по SSH-ключу (без вопросов и без ожидания).
+# Добавляет публичную часть серверного Deploy Key в репозиторий через API.
+# Нужен токен с правом Administration: Read and write. Ошибка не фатальна:
+# ключ всегда можно добавить вручную.
+register_github_deploy_key() {
+    local slug="$1" token="$2" pub material existing out title
+    [[ "${AUTH_MODE}" == "ssh" && -n "${SSH_PRIVATE_KEY_PATH}" ]] || return 0
+    pub="${SSH_PRIVATE_KEY_PATH}.pub"
+    [[ -r "${pub}" ]] || return 0
+    material="$(awk '{print $2}' "${pub}")"
+    [[ -n "${material}" ]] || return 0
+
+    if ! existing="$(GH_TOKEN="${token}" "${GH_BIN}" api "repos/${slug}/keys" --paginate --jq '.[].key' 2>&1)"; then
+        print_warning "$(t m252 "Could not check Deploy Keys in ${slug} (the token needs Administration: Read and write). Add the key manually: Settings → Deploy keys.")"
+        return 1
+    fi
+    if printf '%s\n' "${existing}" | grep -Fq -- "${material}"; then
+        echo "$(t m253 "  ✓ The Deploy Key is already added to ${slug}.")"
+        return 0
+    fi
+    title="sync-repo:$(hostname):${REPO_DIR##*/}"
+    if ! out="$(GH_TOKEN="${token}" "${GH_BIN}" api -X POST "repos/${slug}/keys" \
+        -f title="${title}" -f key="$(cat "${pub}")" -F read_only=true 2>&1)"; then
+        out="$(printf '%s' "${out}" | head -n 2 | tr '\n' ' ')"
+        print_warning "$(t m254 "Could not add the Deploy Key to ${slug}: ${out}")"
+        return 1
+    fi
+    echo "$(t m255 "  ✓ The Deploy Key (read-only) was added to ${slug}: ${title}")"
+    return 0
+}
+
 probe_ssh_access() {
     resolve_ssh_private_key
     prepare_ssh_wrapper
@@ -626,6 +656,15 @@ apply_install_options() {
             ;;
         ssh)
             setup_deploy_key
+            if ! probe_ssh_access; then
+                local reg_token reg_slug
+                reg_token="${SYNC_REPO_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+                reg_slug="$(github_slug_from_url "${REPOSITORY_URL}" 2>/dev/null || true)"
+                if [[ -n "${reg_token}" && -n "${reg_slug}" ]] && ensure_gh_cli; then
+                    register_github_deploy_key "${reg_slug}" "${reg_token}" || true
+                    sleep 2
+                fi
+            fi
             if ! probe_ssh_access; then
                 echo "$(t m240 "Add the public key above to GitHub (Repository → Settings → Deploy keys → Add deploy key), then run the same command again.")"
                 exit 3
@@ -950,7 +989,11 @@ configure_github_automatically() {
         echo "$(t m076 "A GitHub token is needed only for this setup (it is not saved to any file).")"
         echo "$(t m077 "Create a fine-grained token: https://github.com/settings/personal-access-tokens/new")"
         echo "  • Repository access: Only select repositories → ${slug}"
-        echo "  • Permissions: Secrets — Read and write; Contents — Read and write; Workflows — Read and write"
+        echo "  • Permissions (all Read and write):"
+        echo "      Administration   (adds the Deploy Key)"
+        echo "      Contents"
+        echo "      Secrets"
+        echo "      Workflows"
         read -r -s -p "$(t m078 "GitHub token: ")" token || return 1
         echo
     fi
@@ -967,6 +1010,8 @@ configure_github_automatically() {
         echo "$(t m083 "Repository access includes ${slug}; the token has not expired.")" >&2
         return 1
     fi
+
+    register_github_deploy_key "${slug}" "${token}" || true
 
     echo "$(t m084 "Creating secrets in ${slug} ...")"
     echo "$(t m229 "Target: ${slug} → Settings → Secrets and variables → Actions → Repository secrets.")"

@@ -24,8 +24,8 @@ secrets, а в `main` ничего не коммитится (раньше ма�
 создаёт все secrets (`DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH`,
 `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`) и коммитит `.github/workflows/deploy.yml`
 в рабочую ветку. Копировать значения вручную больше не нужно.
-Нужен только fine-grained токен GitHub на этот репозиторий с правами Secrets, Contents
-и Workflows (Read and write); токен запрашивается один раз и нигде не сохраняется
+Нужен только fine-grained токен GitHub на этот репозиторий с правами (все Read and write):
+Administration (добавляет Deploy Key), Contents, Secrets, Workflows; токен запрашивается один раз и нигде не сохраняется
 (можно передать через `GH_TOKEN`). Если автонастройка не удалась или выбран ответ «n»,
 мастер показывает прежнюю инструкцию для ручной настройки.
 
@@ -221,7 +221,16 @@ python3 tests/test_sync_repo.py
   `~/.local/bin`, `~/bin` и временный каталог (часть каталогов бывает `noexec`), а при падении
   Go-рантайма включает `GOMAXPROCS=1` (лимит потоков на хостинге). Текст ошибки выводится на экран.
 - **Токен не принят.** Нужен fine-grained токен: Resource owner — владелец репозитория,
-  Repository access — этот репозиторий, права Secrets, Contents и Workflows (Read and write).
+  Repository access — этот репозиторий, права (все Read and write): Administration, Contents, Secrets, Workflows.
   Ответ GitHub показывается на экране; токен нигде не сохраняется.
 - **Deploy key** (ключ репозитория) нужен серверу для `git pull` и лучше read-only. Автодеплой
   «GitHub → хостинг» делает GitHub Actions по SSH с отдельным Actions-ключом (его создаёт мастер).
+
+## Автоматическое добавление Deploy Key
+
+Если репозиторий приватный и сервер читает его по SSH (Deploy Key), мастер автодеплоя
+(меню, пункт 3) сам добавляет публичную часть серверного ключа в Settings → Deploy keys
+(только чтение) и не дублирует уже добавленный. Для этого токену нужно право
+Administration (Read and write). Без него скрипт предупредит, и ключ можно добавить вручную.
+При `--install` с адресом `git@github.com:...` ключ добавляется так же, если задан
+`SYNC_REPO_TOKEN` (или `GH_TOKEN`).
