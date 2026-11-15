@@ -461,7 +461,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.7.1"', 'SCRIPT_VERSION="1.7.2"', 1).replace(
+            'SCRIPT_VERSION="1.7.2"', 'SCRIPT_VERSION="1.7.3"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -478,7 +478,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.1"', 'SCRIPT_VERSION="1.7.2"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.2"', 'SCRIPT_VERSION="1.7.3"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -492,20 +492,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.1"', 'SCRIPT_VERSION="1.7.2"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.2"', 'SCRIPT_VERSION="1.7.3"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.7.1", result.stdout)
+        self.assertIn("1.7.2", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.7.1", "1.3.10"):
+        for version in ("1.7.2", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.1"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.2"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -516,7 +516,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.1"', 'SCRIPT_VERSION="1.7.2"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.2"', 'SCRIPT_VERSION="1.7.3"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -888,7 +888,8 @@ exit 0
         self.assertNotIn("AAAAOLD", authorized)
 
     def test_empty_value_is_refused_and_not_claimed_configured(self):
-        project, result, log = self.wizard("y\nghp_secret_token\n\n", {"FAKE_KEYSCAN_EMPTY": "1"})
+        # пустая строка на запрос ручной вставки = пропустить
+        project, result, log = self.wizard("\ny\nghp_secret_token\n\n", {"FAKE_KEYSCAN_EMPTY": "1"})
         out = result.stdout + result.stderr
         self.assertIn("DEPLOY_KNOWN_HOSTS — пустое значение не записывается", out)
         self.assertNotIn("SECRET DEPLOY_KNOWN_HOSTS", log)
@@ -909,6 +910,38 @@ exit 0
         self.assertIn("repos/acme/site/keys", log)
         self.assertIn("read_only=true", log)
         self.assertIn("Deploy Key", out)
+
+    def test_known_hosts_can_be_pasted_and_is_remembered(self):
+        # сервер не видит собственные ключи: вставляем вывод ssh-keyscan с компьютера
+        project, result, log = self.wizard(
+            "srv.example ssh-ed25519 AAAAPASTED\n# комментарий\n\ny\nghp_secret_token\n\n",
+            {"FAKE_KEYSCAN_EMPTY": "1"})
+        out = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("SECRET DEPLOY_KNOWN_HOSTS <<srv.example ssh-ed25519 AAAAPASTED>>", log)
+        self.assertNotIn("комментарий", log)
+        cache = project / ".deploy/sync_repo_known_hosts"
+        self.assertIn("AAAAPASTED", cache.read_text())
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+        # кэш не попадает в Git проекта
+        self.assertNotIn("sync_repo_known_hosts", self.git(project, "status", "--porcelain"))
+
+    def test_saved_known_hosts_are_used_without_asking(self):
+        def prepare(project):
+            (project / ".deploy/sync_repo_known_hosts").write_text("srv.example ssh-ed25519 AAAASAVED\n")
+        project, result, log = self.wizard("y\nghp_secret_token\n\n", {"FAKE_KEYSCAN_EMPTY": "1"}, prepare)
+        out = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("AAAASAVED", log)
+        self.assertNotIn("ssh-keyscan -p", out)
+
+    def test_existing_known_hosts_secret_is_kept_when_nothing_found(self):
+        project, result, log = self.wizard("\ny\nghp_secret_token\n\n",
+                                          {"FAKE_KEYSCAN_EMPTY": "1", "FAKE_GH_EXISTING": "DEPLOY_KNOWN_HOSTS"})
+        out = result.stdout + result.stderr
+        self.assertIn("существующий секрет", out)
+        self.assertNotIn("SECRET DEPLOY_KNOWN_HOSTS", log)
+        self.assertNotIn("пустое значение не записывается", out)
 
     def test_fingerprint_falls_back_to_local_scan(self):
         project, result, log = self.wizard("y\nghp_secret_token\n\n", {"FAKE_KEYSCAN_LOCAL_ONLY": "1"})

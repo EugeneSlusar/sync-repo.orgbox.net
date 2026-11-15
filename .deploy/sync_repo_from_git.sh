@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.7.1"
+SCRIPT_VERSION="1.7.2"
 AUTO_MODE=false
 INSTALL_MODE=false
 ARG_REPO=""
@@ -422,6 +422,7 @@ ensure_local_files_are_excluded() {
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key" \
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key.pub" \
         "${PROJECT_CONFIG_DIR}/github_actions_deploy_key.pub" \
+        "${PROJECT_CONFIG_DIR}/sync_repo_known_hosts" \
         "${PROJECT_CONFIG_DIR}/github_actions_deploy.workflow.yml" \
         "${PROJECT_CONFIG_DIR}/lang/*" \
         "${PROJECT_CONFIG_DIR}/backup-*" \
@@ -1037,6 +1038,11 @@ configure_github_automatically() {
             DEPLOY_PATH) value="${deploy_path}" ;;
             DEPLOY_KNOWN_HOSTS) value="${known_hosts}" ;;
         esac
+        if [[ "${name}" == DEPLOY_KNOWN_HOSTS && -z "${value}" ]] \
+            && [[ -n "$(github_secret_updated_at DEPLOY_KNOWN_HOSTS 2>/dev/null || true)" ]]; then
+            echo "$(t m263 "  • DEPLOY_KNOWN_HOSTS: no new value found, the existing secret in ${slug} is kept.")"
+            continue
+        fi
         set_github_secret "${name}" value "${value}" || secrets_failed=$((secrets_failed + 1))
     done
     if [[ -n "${private_key_file}" ]]; then
@@ -1114,6 +1120,75 @@ actions_ssh_result() {
     fi
 }
 
+# Оставляет только строки формата known_hosts («имя тип ключ»), комментарии отбрасывает.
+normalize_known_hosts() {
+    awk '!/^[[:space:]]*#/ && NF >= 3 && $2 ~ /^(ssh-|ecdsa-|sk-)/' | tr -d '\r'
+}
+
+# Собирает публичные ключи SSH-хоста для DEPLOY_KNOWN_HOSTS. Печатает их в stdout,
+# сообщения идут в stderr. Источники по порядку: SYNC_REPO_KNOWN_HOSTS, ssh-keyscan по
+# имени, по адресу этого же сервера (из SSH_CONNECTION, DNS, 127.0.0.1), /etc/ssh/*.pub,
+# сохранённая копия в .deploy/sync_repo_known_hosts и, если ничего не вышло, ручная вставка.
+# Найденное сохраняется в копию, поэтому спрашивать повторно не придётся.
+collect_known_hosts() {
+    local host="$1" port="$2" name="$1" cache result="" target host_pub line
+    local -a targets=()
+    [[ "${port}" != "22" ]] && name="[${host}]:${port}"
+    cache="${PROJECT_CONFIG_DIR}/sync_repo_known_hosts"
+
+    if [[ -n "${SYNC_REPO_KNOWN_HOSTS:-}" ]]; then
+        result="$(printf '%s\n' "${SYNC_REPO_KNOWN_HOSTS}" | normalize_known_hosts)"
+    fi
+    if [[ -z "${result}" ]]; then
+        result="$(ssh-keyscan -p "${port}" -T 10 "${host}" 2>/dev/null | normalize_known_hosts || true)"
+    fi
+    if [[ -z "${result}" ]]; then
+        # Хостинг часто не пускает исходящие подключения к собственному имени:
+        # пробуем адрес, по которому нас достал клиент, адреса из DNS и локальный адрес,
+        # а настоящее имя хоста подставляем сами.
+        if [[ -n "${SSH_CONNECTION:-}" ]]; then
+            read -r _ _ target _ <<< "${SSH_CONNECTION}"
+            [[ -n "${target}" ]] && targets+=("${target}")
+        fi
+        if command -v getent >/dev/null 2>&1; then
+            while read -r target _; do
+                [[ -n "${target}" ]] && targets+=("${target}")
+            done < <(getent ahostsv4 "${host}" 2>/dev/null | awk '!seen[$1]++ { print $1 }' || true)
+        fi
+        targets+=(127.0.0.1 localhost)
+        for target in "${targets[@]}"; do
+            result="$(ssh-keyscan -p "${port}" -T 5 "${target}" 2>/dev/null \
+                | normalize_known_hosts | awk -v n="${name}" '{ $1 = n; print }' || true)"
+            [[ -n "${result}" ]] && break
+        done
+    fi
+    if [[ -z "${result}" ]]; then
+        for host_pub in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_rsa_key.pub; do
+            [[ -r "${host_pub}" ]] || continue
+            result="${result}${result:+$'\n'}$(awk -v n="${name}" 'NF >= 2 { print n, $1, $2 }' "${host_pub}")"
+        done
+    fi
+    if [[ -z "${result}" && -r "${cache}" ]]; then
+        result="$(normalize_known_hosts < "${cache}")"
+        [[ -n "${result}" ]] && echo "$(t m259 "SSH host keys taken from the saved copy: ${cache}")" >&2
+    fi
+    if [[ -z "${result}" ]]; then
+        echo >&2
+        echo "$(t m260 "The server cannot read its own SSH host keys (typical for shared hosting).")" >&2
+        echo "$(t m261 "On YOUR computer run:  ssh-keyscan -p ${port} ${host}")" >&2
+        echo "$(t m262 "Paste the whole output here, then an empty line (or just press Enter to skip):")" >&2
+        while IFS= read -r line; do
+            [[ -z "${line}" ]] && break
+            result="${result}${result:+$'\n'}${line}"
+        done
+        result="$(printf '%s\n' "${result}" | normalize_known_hosts)"
+    fi
+    if [[ -n "${result}" ]]; then
+        printf '%s\n' "${result}" > "${cache}" 2>/dev/null && chmod 600 "${cache}" 2>/dev/null || true
+        printf '%s\n' "${result}"
+    fi
+}
+
 setup_actions_autodeploy() {
     local deploy_host deploy_port deploy_user deploy_path workflow_file
     local actions_key actions_public known_hosts ssh_result existing_actions_key
@@ -1160,26 +1235,7 @@ setup_actions_autodeploy() {
         install -d -m 700 "${HOME}/.ssh"
     fi
 
-    known_hosts="$(ssh-keyscan -p "${deploy_port}" -T 10 "${deploy_host}" 2>/dev/null || true)"
-    if [[ -z "${known_hosts}" ]]; then
-        # Хостинг часто не пускает исходящие подключения к собственному имени:
-        # пробуем адрес этого же сервера и подставляем настоящее имя хоста.
-        local known_name="${deploy_host}" scan_target
-        [[ "${deploy_port}" != "22" ]] && known_name="[${deploy_host}]:${deploy_port}"
-        for scan_target in 127.0.0.1 localhost; do
-            known_hosts="$(ssh-keyscan -p "${deploy_port}" -T 5 "${scan_target}" 2>/dev/null \
-                | awk -v n="${known_name}" '!/^#/ && NF >= 3 { $1 = n; print }' || true)"
-            [[ -n "${known_hosts}" ]] && break
-        done
-    fi
-    if [[ -z "${known_hosts}" ]]; then
-        # Последний шанс: публичные ключи хоста, если их можно прочитать на сервере.
-        local host_pub
-        for host_pub in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_rsa_key.pub; do
-            [[ -r "${host_pub}" ]] || continue
-            known_hosts="${known_hosts}${known_hosts:+$'\n'}$(awk -v n="${known_name}" 'NF >= 2 { print n, $1, $2 }' "${host_pub}")"
-        done
-    fi
+    known_hosts="$(collect_known_hosts "${deploy_host}" "${deploy_port}")"
     if [[ -z "${known_hosts}" ]]; then
         echo "$(t m101 "Warning: could not get the SSH fingerprint for ${deploy_host}.")" >&2
     fi
