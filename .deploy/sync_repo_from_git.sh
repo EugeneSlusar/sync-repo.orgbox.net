@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.7.2"
+SCRIPT_VERSION="1.8.0"
 AUTO_MODE=false
 INSTALL_MODE=false
 ARG_REPO=""
@@ -991,6 +991,7 @@ configure_github_automatically() {
         echo "$(t m077 "Create a fine-grained token: https://github.com/settings/personal-access-tokens/new")"
         echo "  • Repository access: Only select repositories → ${slug}"
         echo "  • Permissions (all Read and write):"
+        echo "      Actions          (reads the SSH host keys through GitHub)"
         echo "      Administration   (adds the Deploy Key)"
         echo "      Contents"
         echo "      Secrets"
@@ -1013,6 +1014,18 @@ configure_github_automatically() {
     fi
 
     register_github_deploy_key "${slug}" "${token}" || true
+
+    RESOLVED_KNOWN_HOSTS=""
+    if [[ -z "${known_hosts}" ]]; then
+        known_hosts="$(fetch_known_hosts_via_runner "${slug}" "${token}" "${deploy_host}" "${deploy_port}" "${branch}" \
+            | normalize_known_hosts || true)"
+        if [[ -n "${known_hosts}" ]]; then
+            printf '%s\n' "${known_hosts}" > "${PROJECT_CONFIG_DIR}/sync_repo_known_hosts" 2>/dev/null \
+                && chmod 600 "${PROJECT_CONFIG_DIR}/sync_repo_known_hosts" 2>/dev/null || true
+            RESOLVED_KNOWN_HOSTS="${known_hosts}"
+            echo "$(t m268 "  ✓ SSH host keys received from GitHub and pinned in DEPLOY_KNOWN_HOSTS.")"
+        fi
+    fi
 
     echo "$(t m084 "Creating secrets in ${slug} ...")"
     echo "$(t m229 "Target: ${slug} → Settings → Secrets and variables → Actions → Repository secrets.")"
@@ -1038,9 +1051,12 @@ configure_github_automatically() {
             DEPLOY_PATH) value="${deploy_path}" ;;
             DEPLOY_KNOWN_HOSTS) value="${known_hosts}" ;;
         esac
-        if [[ "${name}" == DEPLOY_KNOWN_HOSTS && -z "${value}" ]] \
-            && [[ -n "$(github_secret_updated_at DEPLOY_KNOWN_HOSTS 2>/dev/null || true)" ]]; then
-            echo "$(t m263 "  • DEPLOY_KNOWN_HOSTS: no new value found, the existing secret in ${slug} is kept.")"
+        if [[ "${name}" == DEPLOY_KNOWN_HOSTS && -z "${value}" ]]; then
+            if [[ -n "$(github_secret_updated_at DEPLOY_KNOWN_HOSTS 2>/dev/null || true)" ]]; then
+                echo "$(t m263 "  • DEPLOY_KNOWN_HOSTS: no new value found, the existing secret in ${slug} is kept.")"
+            else
+                echo "$(t m270 "  • DEPLOY_KNOWN_HOSTS skipped: the workflow will read the host keys on the GitHub runner.")"
+            fi
             continue
         fi
         set_github_secret "${name}" value "${value}" || secrets_failed=$((secrets_failed + 1))
@@ -1125,6 +1141,20 @@ normalize_known_hosts() {
     awk '!/^[[:space:]]*#/ && NF >= 3 && $2 ~ /^(ssh-|ecdsa-|sk-)/' | tr -d '\r'
 }
 
+# Ручная вставка вывода ssh-keyscan с другого компьютера. Пустой ввод — пропуск.
+prompt_known_hosts_manually() {
+    local host="$1" port="$2" line result=""
+    echo >&2
+    echo "$(t m260 "The server cannot read its own SSH host keys (typical for shared hosting).")" >&2
+    echo "$(t m261 "On YOUR computer run:  ssh-keyscan -p ${port} ${host}")" >&2
+    echo "$(t m262 "Paste the whole output here, then an empty line (or just press Enter to skip):")" >&2
+    while IFS= read -r line; do
+        [[ -z "${line}" ]] && break
+        result="${result}${result:+$'\n'}${line}"
+    done
+    printf '%s\n' "${result}" | normalize_known_hosts
+}
+
 # Собирает публичные ключи SSH-хоста для DEPLOY_KNOWN_HOSTS. Печатает их в stdout,
 # сообщения идут в stderr. Источники по порядку: SYNC_REPO_KNOWN_HOSTS, ssh-keyscan по
 # имени, по адресу этого же сервера (из SSH_CONNECTION, DNS, 127.0.0.1), /etc/ssh/*.pub,
@@ -1138,6 +1168,10 @@ collect_known_hosts() {
 
     if [[ -n "${SYNC_REPO_KNOWN_HOSTS:-}" ]]; then
         result="$(printf '%s\n' "${SYNC_REPO_KNOWN_HOSTS}" | normalize_known_hosts)"
+    fi
+    if [[ -z "${result}" && -r "${cache}" ]]; then
+        result="$(normalize_known_hosts < "${cache}")"
+        [[ -n "${result}" ]] && echo "$(t m259 "SSH host keys taken from the saved copy: ${cache}")" >&2
     fi
     if [[ -z "${result}" ]]; then
         result="$(ssh-keyscan -p "${port}" -T 10 "${host}" 2>/dev/null | normalize_known_hosts || true)"
@@ -1168,25 +1202,119 @@ collect_known_hosts() {
             result="${result}${result:+$'\n'}$(awk -v n="${name}" 'NF >= 2 { print n, $1, $2 }' "${host_pub}")"
         done
     fi
-    if [[ -z "${result}" && -r "${cache}" ]]; then
-        result="$(normalize_known_hosts < "${cache}")"
-        [[ -n "${result}" ]] && echo "$(t m259 "SSH host keys taken from the saved copy: ${cache}")" >&2
-    fi
-    if [[ -z "${result}" ]]; then
-        echo >&2
-        echo "$(t m260 "The server cannot read its own SSH host keys (typical for shared hosting).")" >&2
-        echo "$(t m261 "On YOUR computer run:  ssh-keyscan -p ${port} ${host}")" >&2
-        echo "$(t m262 "Paste the whole output here, then an empty line (or just press Enter to skip):")" >&2
-        while IFS= read -r line; do
-            [[ -z "${line}" ]] && break
-            result="${result}${result:+$'\n'}${line}"
-        done
-        result="$(printf '%s\n' "${result}" | normalize_known_hosts)"
+    if [[ -z "${result}" && "${3:-ask}" != "noask" ]]; then
+        result="$(prompt_known_hosts_manually "${host}" "${port}")"
     fi
     if [[ -n "${result}" ]]; then
         printf '%s\n' "${result}" > "${cache}" 2>/dev/null && chmod 600 "${cache}" 2>/dev/null || true
         printf '%s\n' "${result}"
     fi
+}
+
+# Получает ключи SSH-хоста «снаружи»: временный workflow запускает ssh-keyscan на
+# GitHub-раннере, а мастер читает результат из лога задачи. Сервер на виртуальном
+# хостинге обычно не может подключиться сам к себе, а раннер — может.
+# Печатает найденные строки known_hosts в stdout (сообщения — в stderr), удаляет временный
+# workflow. Нужен токен с правами Actions и Contents/Workflows (Read and write).
+fetch_known_hosts_via_runner() {
+    local slug="$1" token="$2" host="$3" port="$4" branch="$5"
+    local wf_name="sync-repo-scan-host-key.yml" wf_path wf_sha="" before_id="0" run_id="" status="" job_id="" log result="" i
+    local interval="${SYNC_REPO_POLL_INTERVAL:-4}" tmp_wf
+
+    wf_path=".github/workflows/${wf_name}"
+    if [[ ! "${host}" =~ ^[A-Za-z0-9._-]+$ || ! "${port}" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+    echo "$(t m264 "Asking GitHub to read the SSH host keys of ${host} from outside (about 30 seconds)...")" >&2
+
+    tmp_wf="$(mktemp "${TMPDIR:-/tmp}/scan-host-key.XXXXXX")"
+    cat > "${tmp_wf}" <<'SCANFLOW'
+name: Scan SSH host key
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: SSH host
+        required: true
+      port:
+        description: SSH port
+        required: true
+        default: '22'
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scan
+        shell: bash
+        env:
+          SCAN_HOST: ${{ inputs.host }}
+          SCAN_PORT: ${{ inputs.port }}
+        run: |
+          set -euo pipefail
+          echo "KNOWN_HOSTS_BEGIN"
+          ssh-keyscan -p "$SCAN_PORT" -T 15 "$SCAN_HOST" 2>/dev/null || true
+          echo "KNOWN_HOSTS_END"
+SCANFLOW
+
+    local api_path="repos/${slug}/contents/${wf_path}" content_b64
+    wf_sha="$(GH_TOKEN="${token}" "${GH_BIN}" api "${api_path}?ref=${branch}" --jq .sha 2>/dev/null || true)"
+    content_b64="$(base64 < "${tmp_wf}" | tr -d '\n')"
+    rm -f -- "${tmp_wf}"
+    local -a put_args=(-X PUT "${api_path}" -f message="Add temporary host key scan workflow" -f branch="${branch}" -f content="${content_b64}")
+    [[ -z "${wf_sha}" ]] || put_args+=(-f sha="${wf_sha}")
+    if ! wf_sha="$(GH_TOKEN="${token}" "${GH_BIN}" api "${put_args[@]}" --jq .content.sha 2>/dev/null)"; then
+        print_warning "$(t m265 "Could not add the temporary workflow to ${slug} (the token needs Contents and Workflows: Read and write).")" >&2
+        return 1
+    fi
+
+    before_id="$(GH_TOKEN="${token}" "${GH_BIN}" api "repos/${slug}/actions/workflows/${wf_name}/runs?per_page=1" \
+        --jq '.workflow_runs[0].id // 0' 2>/dev/null || true)"
+    before_id="${before_id:-0}"
+
+    local dispatched=false
+    for i in 1 2 3 4 5 6 7 8; do
+        if GH_TOKEN="${token}" "${GH_BIN}" api -X POST "repos/${slug}/actions/workflows/${wf_name}/dispatches" \
+            -f ref="${branch}" -f "inputs[host]=${host}" -f "inputs[port]=${port}" >/dev/null 2>&1; then
+            dispatched=true
+            break
+        fi
+        sleep "${interval}"   # GitHub регистрирует новый workflow не мгновенно
+    done
+
+    if [[ "${dispatched}" == true ]]; then
+        for i in $(seq 1 40); do
+            run_id="$(GH_TOKEN="${token}" "${GH_BIN}" api "repos/${slug}/actions/workflows/${wf_name}/runs?per_page=1" \
+                --jq '.workflow_runs[0] | "\(.id) \(.status)"' 2>/dev/null | awk -v b="${before_id}" '$1 ~ /^[0-9]+$/ && $1 + 0 > b + 0 { print $1 }' || true)"
+            if [[ -n "${run_id}" ]]; then
+                status="$(GH_TOKEN="${token}" "${GH_BIN}" api "repos/${slug}/actions/runs/${run_id}" --jq .status 2>/dev/null || true)"
+                [[ "${status}" == completed ]] && break
+            fi
+            sleep "${interval}"
+        done
+        if [[ "${status}" == completed ]]; then
+            job_id="$(GH_TOKEN="${token}" "${GH_BIN}" api "repos/${slug}/actions/runs/${run_id}/jobs" --jq '.jobs[0].id' 2>/dev/null || true)"
+            if [[ -n "${job_id}" ]]; then
+                log="$(GH_TOKEN="${token}" "${GH_BIN}" api "repos/${slug}/actions/jobs/${job_id}/logs" 2>/dev/null || true)"
+                result="$(printf '%s\n' "${log}" | tr -d '\r' \
+                    | sed -E 's/^[0-9T:.Z-]+[[:space:]]+//' \
+                    | awk '/^KNOWN_HOSTS_BEGIN$/ { on = 1; next } /^KNOWN_HOSTS_END$/ { on = 0 } on' \
+                    | normalize_known_hosts || true)"
+            fi
+        fi
+    fi
+
+    # Временный workflow удаляем в любом случае.
+    GH_TOKEN="${token}" "${GH_BIN}" api -X DELETE "${api_path}" -f message="Remove temporary host key scan workflow" \
+        -f branch="${branch}" -f sha="${wf_sha}" >/dev/null 2>&1 || \
+        print_warning "$(t m266 "Could not delete ${wf_path} from ${slug}: remove the file manually.")" >&2
+
+    if [[ -z "${result}" ]]; then
+        print_warning "$(t m267 "GitHub did not return the SSH host keys (check that Actions are enabled and the token has Actions: Read and write).")" >&2
+        return 1
+    fi
+    printf '%s\n' "${result}"
 }
 
 setup_actions_autodeploy() {
@@ -1235,10 +1363,7 @@ setup_actions_autodeploy() {
         install -d -m 700 "${HOME}/.ssh"
     fi
 
-    known_hosts="$(collect_known_hosts "${deploy_host}" "${deploy_port}")"
-    if [[ -z "${known_hosts}" ]]; then
-        echo "$(t m101 "Warning: could not get the SSH fingerprint for ${deploy_host}.")" >&2
-    fi
+    known_hosts="$(collect_known_hosts "${deploy_host}" "${deploy_port}" noask)"
 
     ssh_result="$(actions_ssh_result)"
 
@@ -1271,7 +1396,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for variable in DEPLOY_HOST DEPLOY_USER DEPLOY_PATH DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+          for variable in DEPLOY_HOST DEPLOY_USER DEPLOY_PATH DEPLOY_SSH_KEY; do
             if [[ -z "${!variable}" ]]; then
               echo "Missing GitHub Secret: ${variable}" >&2
               exit 1
@@ -1282,7 +1407,6 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
 
       - name: Configure SSH
         shell: bash
@@ -1293,9 +1417,17 @@ jobs:
             '/^----- BEGIN DEPLOY_SSH_KEY -----$/d; /^----- END DEPLOY_SSH_KEY -----$/d' \
             > "$HOME/.ssh/deploy_key"
           chmod 600 "$HOME/.ssh/deploy_key"
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          if [[ -n "${DEPLOY_KNOWN_HOSTS//[[:space:]]/}" ]]; then
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          else
+            echo "::warning::DEPLOY_KNOWN_HOSTS is empty: reading the host keys of $DEPLOY_HOST on the runner (checked on first contact, not pinned)."
+            ssh-keyscan -p "${DEPLOY_PORT:-22}" -T 15 "$DEPLOY_HOST" > "$HOME/.ssh/known_hosts"
+            [[ -s "$HOME/.ssh/known_hosts" ]] || { echo "Could not read the SSH host keys of $DEPLOY_HOST" >&2; exit 1; }
+          fi
           chmod 644 "$HOME/.ssh/known_hosts"
         env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
 
@@ -1325,6 +1457,7 @@ WORKFLOW
             local setup_status=0
             configure_github_automatically "${deploy_host}" "${deploy_port}" "${deploy_user}" \
                 "${deploy_path}" "${known_hosts}" "${actions_key:-}" "${workflow_file}" || setup_status=$?
+            known_hosts="${RESOLVED_KNOWN_HOSTS:-${known_hosts}}"
             if [[ "${setup_status}" == 3 ]]; then
                 # Секрета DEPLOY_SSH_KEY в GitHub нет, а приватной части старого ключа тоже нет.
                 create_actions_key
@@ -1332,6 +1465,7 @@ WORKFLOW
                 setup_status=0
                 configure_github_automatically "${deploy_host}" "${deploy_port}" "${deploy_user}" \
                     "${deploy_path}" "${known_hosts}" "${actions_key:-}" "${workflow_file}" || setup_status=$?
+                known_hosts="${RESOLVED_KNOWN_HOSTS:-${known_hosts}}"
             fi
             GITHUB_SETUP_TOKEN=""
             if [[ "${setup_status}" == 0 ]]; then
@@ -1347,6 +1481,17 @@ WORKFLOW
             fi
             print_warning "$(t m109 "Automatic setup failed — showing manual setup instructions.")"
         fi
+    fi
+
+    if [[ -z "${known_hosts}" && "${AUTO_MODE}" == false ]]; then
+        known_hosts="$(prompt_known_hosts_manually "${deploy_host}" "${deploy_port}")"
+        if [[ -n "${known_hosts}" ]]; then
+            printf '%s\n' "${known_hosts}" > "${PROJECT_CONFIG_DIR}/sync_repo_known_hosts" 2>/dev/null \
+                && chmod 600 "${PROJECT_CONFIG_DIR}/sync_repo_known_hosts" 2>/dev/null || true
+        fi
+    fi
+    if [[ -z "${known_hosts}" ]]; then
+        print_warning "$(t m269 "DEPLOY_KNOWN_HOSTS is empty: the workflow will read the host keys on the GitHub runner at every deploy (checked on first contact, not pinned).")"
     fi
 
     echo
@@ -1745,6 +1890,14 @@ if ! git show-ref --verify --quiet "refs/remotes/${REMOTE}/${BRANCH}"; then
                 break
             fi
         done
+    fi
+    if [[ -z "${REMOTE_DEFAULT_BRANCH}" ]]; then
+        # Единственная ветка репозитория (например, claude/...) и есть основная.
+        only_branches="$(git for-each-ref --format='%(refname:short)' "refs/remotes/${REMOTE}/" 2>/dev/null \
+            | sed "s#^${REMOTE}/##" | grep -v '^HEAD$' || true)"
+        if [[ -n "${only_branches}" && "$(printf '%s\n' "${only_branches}" | wc -l)" -eq 1 ]]; then
+            REMOTE_DEFAULT_BRANCH="${only_branches}"
+        fi
     fi
     if [[ -n "${REMOTE_DEFAULT_BRANCH}" ]] && [[ "${REMOTE_DEFAULT_BRANCH}" != "${BRANCH}" ]]; then
         if [[ "${INSTALL_MODE}" == true && "${BRANCH_EXPLICIT}" == false ]]; then

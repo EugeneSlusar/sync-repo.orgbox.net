@@ -461,7 +461,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.7.2"', 'SCRIPT_VERSION="1.7.3"', 1).replace(
+            'SCRIPT_VERSION="1.8.0"', 'SCRIPT_VERSION="1.8.1"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -478,7 +478,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.2"', 'SCRIPT_VERSION="1.7.3"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.0"', 'SCRIPT_VERSION="1.8.1"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -492,20 +492,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.2"', 'SCRIPT_VERSION="1.7.3"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.0"', 'SCRIPT_VERSION="1.8.1"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.7.2", result.stdout)
+        self.assertIn("1.8.0", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.7.2", "1.3.10"):
+        for version in ("1.8.0", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.2"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.0"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -516,7 +516,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.7.2"', 'SCRIPT_VERSION="1.7.3"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.0"', 'SCRIPT_VERSION="1.8.1"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -560,6 +560,23 @@ case "$1" in
     for a in "$@"; do
       if [[ "$a" == "PUT" ]]; then echo "PUT $*" >> "$FAKE_GH_LOG"; put=1; fi
     done
+    case "$*" in
+      *contents/.github/workflows/sync-repo-scan-host-key.yml*)
+        if [[ "$*" == *DELETE* ]]; then echo "DELETE $*" >> "$FAKE_GH_LOG"; exit 0; fi
+        if [[ "$*" == *PUT* ]]; then echo scansha1; fi
+        exit 0 ;;
+      *actions/workflows/sync-repo-scan-host-key.yml/dispatches*)
+        echo "DISPATCH $*" >> "$FAKE_GH_LOG"; exit 0 ;;
+      *actions/workflows/sync-repo-scan-host-key.yml/runs*)
+        c="$FAKE_GH_LOG.runs"; n=$(cat "$c" 2>/dev/null || echo 0); echo $((n+1)) > "$c"
+        if (( n == 0 )); then echo 0; else echo "101 completed"; fi; exit 0 ;;
+      *actions/runs/101/jobs*) echo 555; exit 0 ;;
+      *actions/runs/101*) echo completed; exit 0 ;;
+      *actions/jobs/555/logs*)
+        echo "2026-11-18T10:00:00.1234567Z KNOWN_HOSTS_BEGIN"
+        [[ -n "${FAKE_RUNNER_EMPTY:-}" ]] || echo "2026-11-18T10:00:00.2234567Z srv.example ssh-ed25519 AAAARUNNER"
+        echo "2026-11-18T10:00:00.3234567Z KNOWN_HOSTS_END"; exit 0 ;;
+    esac
     if [[ "$*" == *"/keys"* ]]; then
       if [[ "$*" == *POST* ]]; then echo "POST $*" >> "$FAKE_GH_LOG"; else echo "${FAKE_GH_KEYS:-}"; fi
       exit 0
@@ -595,6 +612,7 @@ exit 0
         for tool in tools.iterdir():
             tool.chmod(0o755)
         env = dict(self.env, HOME=str(home), SYNC_REPO_GH_BIN=str(fake), FAKE_GH_LOG=str(log),
+                   SYNC_REPO_POLL_INTERVAL="0",
                    PATH=str(tools) + os.pathsep + self.env["PATH"])
         env.pop("GH_TOKEN", None)
         env.pop("GITHUB_TOKEN", None)
@@ -887,14 +905,31 @@ exit 0
         self.assertIn("AAAAFAKE", authorized)
         self.assertNotIn("AAAAOLD", authorized)
 
-    def test_empty_value_is_refused_and_not_claimed_configured(self):
-        # пустая строка на запрос ручной вставки = пропустить
-        project, result, log = self.wizard("\ny\nghp_secret_token\n\n", {"FAKE_KEYSCAN_EMPTY": "1"})
+    def test_known_hosts_skipped_when_nothing_found_but_setup_succeeds(self):
+        # ни сервер, ни GitHub-раннер не вернули ключи хоста: секрет не пишем, деплой не блокируем
+        project, result, log = self.wizard("y\nghp_secret_token\n\n",
+                                          {"FAKE_KEYSCAN_EMPTY": "1", "FAKE_RUNNER_EMPTY": "1"})
         out = result.stdout + result.stderr
-        self.assertIn("DEPLOY_KNOWN_HOSTS — пустое значение не записывается", out)
+        self.assertEqual(result.returncode, 0, out)
         self.assertNotIn("SECRET DEPLOY_KNOWN_HOSTS", log)
-        self.assertIn("Автонастройка не удалась", out)
-        self.assertNotIn("Автодеплой настроен", out)
+        self.assertIn("DEPLOY_KNOWN_HOSTS пропущен", out)
+        self.assertIn("Автодеплой настроен", out)
+        self.assertNotIn("Автонастройка не удалась", out)
+
+    def test_known_hosts_are_received_from_github_runner_and_pinned(self):
+        project, result, log = self.wizard("y\nghp_secret_token\n\n", {"FAKE_KEYSCAN_EMPTY": "1"})
+        out = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("DISPATCH", log)
+        self.assertIn("inputs[host]=127.0.0.1", log)
+        self.assertIn("SECRET DEPLOY_KNOWN_HOSTS <<srv.example ssh-ed25519 AAAARUNNER>>", log)
+        self.assertIn("закреплены в DEPLOY_KNOWN_HOSTS", out)
+        # временный workflow создан и удалён
+        self.assertIn("PUT api -X PUT repos/acme/site/contents/.github/workflows/sync-repo-scan-host-key.yml", log)
+        self.assertIn("DELETE", log)
+        cache = project / ".deploy/sync_repo_known_hosts"
+        self.assertIn("AAAARUNNER", cache.read_text())
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
 
     def test_wizard_adds_server_deploy_key_to_github(self):
         def prepare(project):
@@ -914,12 +949,12 @@ exit 0
     def test_known_hosts_can_be_pasted_and_is_remembered(self):
         # сервер не видит собственные ключи: вставляем вывод ssh-keyscan с компьютера
         project, result, log = self.wizard(
-            "srv.example ssh-ed25519 AAAAPASTED\n# комментарий\n\ny\nghp_secret_token\n\n",
+            "n\nsrv.example ssh-ed25519 AAAAPASTED\n# комментарий\n\n",
             {"FAKE_KEYSCAN_EMPTY": "1"})
         out = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, out)
-        self.assertIn("SECRET DEPLOY_KNOWN_HOSTS <<srv.example ssh-ed25519 AAAAPASTED>>", log)
-        self.assertNotIn("комментарий", log)
+        self.assertIn("srv.example ssh-ed25519 AAAAPASTED", out)
+        self.assertNotIn("комментарий", out)
         cache = project / ".deploy/sync_repo_known_hosts"
         self.assertIn("AAAAPASTED", cache.read_text())
         self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
@@ -936,8 +971,9 @@ exit 0
         self.assertNotIn("ssh-keyscan -p", out)
 
     def test_existing_known_hosts_secret_is_kept_when_nothing_found(self):
-        project, result, log = self.wizard("\ny\nghp_secret_token\n\n",
-                                          {"FAKE_KEYSCAN_EMPTY": "1", "FAKE_GH_EXISTING": "DEPLOY_KNOWN_HOSTS"})
+        project, result, log = self.wizard("y\nghp_secret_token\n\n",
+                                          {"FAKE_KEYSCAN_EMPTY": "1", "FAKE_RUNNER_EMPTY": "1",
+                                           "FAKE_GH_EXISTING": "DEPLOY_KNOWN_HOSTS"})
         out = result.stdout + result.stderr
         self.assertIn("существующий секрет", out)
         self.assertNotIn("SECRET DEPLOY_KNOWN_HOSTS", log)

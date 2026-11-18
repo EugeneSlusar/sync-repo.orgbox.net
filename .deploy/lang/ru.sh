@@ -518,3 +518,18 @@ L_m261='На ВАШЕМ компьютере выполните:  ssh-keyscan -p
 L_m262='Вставьте сюда весь вывод, затем пустую строку (или просто нажмите Enter, чтобы пропустить):'
 # en: DEPLOY_KNOWN_HOSTS: no new value found, the existing secret in ${slug} is kept.
 L_m263='  • DEPLOY_KNOWN_HOSTS: новое значение не найдено, существующий секрет в ${slug} оставлен без изменений.'
+
+# en: Asking GitHub to read the SSH host keys of ${host} from outside (about 30 seconds)...
+L_m264='Прошу GitHub прочитать ключи SSH-хоста ${host} снаружи (около 30 секунд)...'
+# en: Could not add the temporary workflow to ${slug} (the token needs Contents and Workflows: Read and write).
+L_m265='Не удалось добавить временный workflow в ${slug} (токену нужны права Contents и Workflows: Read and write).'
+# en: Could not delete ${wf_path} from ${slug}: remove the file manually.
+L_m266='Не удалось удалить ${wf_path} из ${slug}: удалите файл вручную.'
+# en: GitHub did not return the SSH host keys (check that Actions are enabled and the token has Actions: Read and write).
+L_m267='GitHub не вернул ключи SSH-хоста (проверьте, что Actions включены, а у токена есть право Actions: Read and write).'
+# en:   ✓ SSH host keys received from GitHub and pinned in DEPLOY_KNOWN_HOSTS.
+L_m268='  ✓ Ключи SSH-хоста получены от GitHub и закреплены в DEPLOY_KNOWN_HOSTS.'
+# en: DEPLOY_KNOWN_HOSTS is empty: the workflow will read the host keys on the GitHub runner at every deploy (checked on first contact, not pinned).
+L_m269='DEPLOY_KNOWN_HOSTS пуст: workflow будет читать ключи хоста на GitHub-раннере при каждом деплое (проверка при первом подключении, без закрепления).'
+# en:   • DEPLOY_KNOWN_HOSTS skipped: the workflow will read the host keys on the GitHub runner.
+L_m270='  • DEPLOY_KNOWN_HOSTS пропущен: workflow прочитает ключи хоста на GitHub-раннере.'
