@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.8.0"
+SCRIPT_VERSION="1.8.1"
 AUTO_MODE=false
 INSTALL_MODE=false
 ARG_REPO=""
@@ -1024,6 +1024,14 @@ configure_github_automatically() {
                 && chmod 600 "${PROJECT_CONFIG_DIR}/sync_repo_known_hosts" 2>/dev/null || true
             RESOLVED_KNOWN_HOSTS="${known_hosts}"
             echo "$(t m268 "  ✓ SSH host keys received from GitHub and pinned in DEPLOY_KNOWN_HOSTS.")"
+        else
+            known_hosts="$(prompt_known_hosts_manually "${deploy_host}" "${deploy_port}")"
+            KNOWN_HOSTS_PROMPTED=true
+            if [[ -n "${known_hosts}" ]]; then
+                printf '%s\n' "${known_hosts}" > "${PROJECT_CONFIG_DIR}/sync_repo_known_hosts" 2>/dev/null \
+                    && chmod 600 "${PROJECT_CONFIG_DIR}/sync_repo_known_hosts" 2>/dev/null || true
+                RESOLVED_KNOWN_HOSTS="${known_hosts}"
+            fi
         fi
     fi
 
@@ -1055,7 +1063,8 @@ configure_github_automatically() {
             if [[ -n "$(github_secret_updated_at DEPLOY_KNOWN_HOSTS 2>/dev/null || true)" ]]; then
                 echo "$(t m263 "  • DEPLOY_KNOWN_HOSTS: no new value found, the existing secret in ${slug} is kept.")"
             else
-                echo "$(t m270 "  • DEPLOY_KNOWN_HOSTS skipped: the workflow will read the host keys on the GitHub runner.")"
+                echo "$(t m270 "  ✗ DEPLOY_KNOWN_HOSTS — the SSH host keys were not obtained, so there is nothing to pin. Without it the deploy workflow will not start.")" >&2
+                secrets_failed=$((secrets_failed + 1))
             fi
             continue
         fi
@@ -1318,6 +1327,7 @@ SCANFLOW
 }
 
 setup_actions_autodeploy() {
+    KNOWN_HOSTS_PROMPTED=false
     local deploy_host deploy_port deploy_user deploy_path workflow_file
     local actions_key actions_public known_hosts ssh_result existing_actions_key
 
@@ -1396,7 +1406,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for variable in DEPLOY_HOST DEPLOY_USER DEPLOY_PATH DEPLOY_SSH_KEY; do
+          for variable in DEPLOY_HOST DEPLOY_USER DEPLOY_PATH DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
             if [[ -z "${!variable}" ]]; then
               echo "Missing GitHub Secret: ${variable}" >&2
               exit 1
@@ -1407,6 +1417,7 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
 
       - name: Configure SSH
         shell: bash
@@ -1417,17 +1428,9 @@ jobs:
             '/^----- BEGIN DEPLOY_SSH_KEY -----$/d; /^----- END DEPLOY_SSH_KEY -----$/d' \
             > "$HOME/.ssh/deploy_key"
           chmod 600 "$HOME/.ssh/deploy_key"
-          if [[ -n "${DEPLOY_KNOWN_HOSTS//[[:space:]]/}" ]]; then
-            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          else
-            echo "::warning::DEPLOY_KNOWN_HOSTS is empty: reading the host keys of $DEPLOY_HOST on the runner (checked on first contact, not pinned)."
-            ssh-keyscan -p "${DEPLOY_PORT:-22}" -T 15 "$DEPLOY_HOST" > "$HOME/.ssh/known_hosts"
-            [[ -s "$HOME/.ssh/known_hosts" ]] || { echo "Could not read the SSH host keys of $DEPLOY_HOST" >&2; exit 1; }
-          fi
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 644 "$HOME/.ssh/known_hosts"
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
 
@@ -1483,7 +1486,7 @@ WORKFLOW
         fi
     fi
 
-    if [[ -z "${known_hosts}" && "${AUTO_MODE}" == false ]]; then
+    if [[ -z "${known_hosts}" && "${AUTO_MODE}" == false && "${KNOWN_HOSTS_PROMPTED}" != true ]]; then
         known_hosts="$(prompt_known_hosts_manually "${deploy_host}" "${deploy_port}")"
         if [[ -n "${known_hosts}" ]]; then
             printf '%s\n' "${known_hosts}" > "${PROJECT_CONFIG_DIR}/sync_repo_known_hosts" 2>/dev/null \
@@ -1491,7 +1494,7 @@ WORKFLOW
         fi
     fi
     if [[ -z "${known_hosts}" ]]; then
-        print_warning "$(t m269 "DEPLOY_KNOWN_HOSTS is empty: the workflow will read the host keys on the GitHub runner at every deploy (checked on first contact, not pinned).")"
+        print_warning "$(t m269 "DEPLOY_KNOWN_HOSTS is empty: the deploy workflow will not start until the SSH host keys are pinned. Run the wizard again (the token needs Actions: Read and write) or paste the output of ssh-keyscan.")"
     fi
 
     echo

@@ -461,7 +461,7 @@ class SyncRepoTest(unittest.TestCase):
         project = self.fixture()
         payload = self.root / "updated.sh"
         payload.write_text(SCRIPT.read_text().replace(
-            'SCRIPT_VERSION="1.8.0"', 'SCRIPT_VERSION="1.8.1"', 1).replace(
+            'SCRIPT_VERSION="1.8.1"', 'SCRIPT_VERSION="1.8.2"', 1).replace(
             "set -Eeuo pipefail", 'set -Eeuo pipefail\nprintf \'%s\\n\' "$*" > "$UPDATE_MARKER"', 1))
         env = self.mock_curl(payload)
         marker = self.root / "update-marker"
@@ -478,7 +478,7 @@ class SyncRepoTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 project = self.fixture(name="skip-update-" + str(len(list(self.root.glob('skip-update-*')))))
                 payload = self.root / "new-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.0"', 'SCRIPT_VERSION="1.8.1"', 1))
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.1"', 'SCRIPT_VERSION="1.8.2"', 1))
                 env = self.mock_curl(payload)
                 result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                                       env=env, check=False, input=answer + "1\n")
@@ -492,20 +492,20 @@ class SyncRepoTest(unittest.TestCase):
     def test_auto_mode_reports_update_without_installing_or_waiting(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.0"', 'SCRIPT_VERSION="1.8.1"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.1"', 'SCRIPT_VERSION="1.8.2"', 1))
         result = self.deploy(project, self.mock_curl(payload))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1.8.0", result.stdout)
+        self.assertIn("1.8.1", result.stdout)
         self.assertEqual((project / ".deploy/sync_repo_from_git.sh").read_text(), SCRIPT.read_text())
         self.assertEqual((project / "public_html/include/app.php").read_text(), "new\n")
         self.assert_runtime(project)
 
     def test_same_or_older_version_is_not_installed(self):
-        for version in ("1.8.0", "1.3.10"):
+        for version in ("1.8.1", "1.3.10"):
             with self.subTest(version=version):
                 project = self.fixture(name="version-" + version)
                 payload = self.root / "other-version.sh"
-                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.0"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
+                payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.1"', 'SCRIPT_VERSION="' + version + '"', 1) + "\n# changed payload\n")
                 result = self.interactive_deploy(project, "", self.mock_curl(payload))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("Доступна новая версия", result.stdout)
@@ -516,7 +516,7 @@ class SyncRepoTest(unittest.TestCase):
     def test_eof_at_update_prompt_does_not_install_download(self):
         project = self.fixture()
         payload = self.root / "new-version.sh"
-        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.0"', 'SCRIPT_VERSION="1.8.1"', 1))
+        payload.write_text(SCRIPT.read_text().replace('SCRIPT_VERSION="1.8.1"', 'SCRIPT_VERSION="1.8.2"', 1))
         result = self.run_cmd("bash", ".deploy/sync_repo_from_git.sh", cwd=project,
                               env=self.mock_curl(payload), check=False, input="")
         self.assertNotEqual(result.returncode, 0)
@@ -905,16 +905,32 @@ exit 0
         self.assertIn("AAAAFAKE", authorized)
         self.assertNotIn("AAAAOLD", authorized)
 
-    def test_known_hosts_skipped_when_nothing_found_but_setup_succeeds(self):
-        # ни сервер, ни GitHub-раннер не вернули ключи хоста: секрет не пишем, деплой не блокируем
+    def test_setup_fails_when_host_keys_cannot_be_obtained(self):
+        # ни сервер, ни GitHub-раннер не вернули ключи, ручной ввод пропущен:
+        # режима «без закрепления» нет, автонастройка честно не считается готовой
         project, result, log = self.wizard("y\nghp_secret_token\n\n",
                                           {"FAKE_KEYSCAN_EMPTY": "1", "FAKE_RUNNER_EMPTY": "1"})
         out = result.stdout + result.stderr
-        self.assertEqual(result.returncode, 0, out)
         self.assertNotIn("SECRET DEPLOY_KNOWN_HOSTS", log)
-        self.assertIn("DEPLOY_KNOWN_HOSTS пропущен", out)
+        self.assertIn("ключи SSH-хоста не получены", out)
+        self.assertIn("Автонастройка не удалась", out)
+        self.assertNotIn("Автодеплой настроен", out)
+
+    def test_pasted_keys_inside_automatic_setup_are_pinned_without_second_prompt(self):
+        project, result, log = self.wizard(
+            "y\nghp_secret_token\nsrv.example ssh-ed25519 AAAAPASTED\n\n\n",
+            {"FAKE_KEYSCAN_EMPTY": "1", "FAKE_RUNNER_EMPTY": "1"})
+        out = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("SECRET DEPLOY_KNOWN_HOSTS <<srv.example ssh-ed25519 AAAAPASTED>>", log)
+        self.assertEqual(out.count("Вставьте сюда весь вывод"), 1)
         self.assertIn("Автодеплой настроен", out)
-        self.assertNotIn("Автонастройка не удалась", out)
+
+    def test_workflow_template_requires_pinned_host_keys(self):
+        text = SCRIPT.read_text()
+        self.assertIn("DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do", text)
+        self.assertNotIn("not pinned", text)
+        self.assertNotIn("ALLOW_UNPINNED", text)
 
     def test_known_hosts_are_received_from_github_runner_and_pinned(self):
         project, result, log = self.wizard("y\nghp_secret_token\n\n", {"FAKE_KEYSCAN_EMPTY": "1"})
