@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Переопределяем pager только для этого процесса, не меняя настройки пользователя.
 export GIT_PAGER=cat
 
-SCRIPT_VERSION="1.8.1"
+SCRIPT_VERSION="1.9.0"
 AUTO_MODE=false
 INSTALL_MODE=false
 ARG_REPO=""
@@ -423,6 +423,7 @@ ensure_local_files_are_excluded() {
         "${PROJECT_CONFIG_DIR}/sync_repo_deploy_key.pub" \
         "${PROJECT_CONFIG_DIR}/github_actions_deploy_key.pub" \
         "${PROJECT_CONFIG_DIR}/sync_repo_known_hosts" \
+        "${PROJECT_CONFIG_DIR}/post_deploy.env" \
         "${PROJECT_CONFIG_DIR}/github_actions_deploy.workflow.yml" \
         "${PROJECT_CONFIG_DIR}/lang/*" \
         "${PROJECT_CONFIG_DIR}/backup-*" \
@@ -2032,8 +2033,49 @@ printf '%s%s%s\n' "${C_VALUE}" "$(t m217 "✓ Your local files (keys, config, up
 POST_DEPLOY_HOOK="${REPO_DIR}/.deploy/post_deploy.sh"
 if [[ -f "${POST_DEPLOY_HOOK}" && "${SYNC_REPO_SKIP_HOOK:-0}" != "1" ]]; then
     echo "$(t m235 "Running post-deploy hook .deploy/post_deploy.sh ...")"
+
+    # Переменные окружения для хука, специфичные для этого сервера (например, PHP_BIN),
+    # берутся из .deploy/post_deploy.env: строки вида NAME=value, файл лежит только на
+    # сервере, не попадает в Git и не выполняется как скрипт (читается построчно).
+    HOOK_ENV_FILE="${PROJECT_CONFIG_DIR}/post_deploy.env"
+    hook_env=()
+    hook_env_names=""
+    if [[ -f "${HOOK_ENV_FILE}" ]]; then
+        hook_re_dq='^"(.*)"$'
+        hook_re_sq="^'(.*)'\$"
+        hook_line_no=0
+        while IFS= read -r hook_line || [[ -n "${hook_line}" ]]; do
+            hook_line_no=$((hook_line_no + 1))
+            hook_line="${hook_line%$'\r'}"
+            hook_line="${hook_line#"${hook_line%%[![:space:]]*}"}"
+            [[ -z "${hook_line}" || "${hook_line}" == \#* ]] && continue
+            hook_line="${hook_line#export }"
+            if [[ "${hook_line}" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+                hook_name="${BASH_REMATCH[1]}"
+                hook_value="${BASH_REMATCH[2]}"
+                if [[ "${hook_value}" =~ ${hook_re_dq} || "${hook_value}" =~ ${hook_re_sq} ]]; then
+                    hook_value="${BASH_REMATCH[1]}"
+                else
+                    hook_value="${hook_value%"${hook_value##*[![:space:]]}"}"
+                fi
+                case "${hook_name}" in
+                    BASH_ENV|ENV|IFS|PROMPT_COMMAND|SHELLOPTS|BASHOPTS|LD_*)
+                        print_warning "$(t m273 "Variable ${hook_name} in ${HOOK_ENV_FILE} is not allowed and was skipped.")" >&2
+                        continue ;;
+                esac
+                hook_env+=("${hook_name}=${hook_value}")
+                hook_env_names="${hook_env_names}${hook_env_names:+, }${hook_name}"
+            else
+                print_warning "$(t m272 "Line ${hook_line_no} of ${HOOK_ENV_FILE} skipped: use the form NAME=value.")" >&2
+            fi
+        done < "${HOOK_ENV_FILE}"
+        if [[ -n "${hook_env_names}" ]]; then
+            echo "$(t m271 "Hook variables loaded from ${HOOK_ENV_FILE}: ${hook_env_names}")"
+        fi
+    fi
+
     hook_status=0
-    (cd -- "${REPO_DIR}" && bash "${POST_DEPLOY_HOOK}") || hook_status=$?
+    (cd -- "${REPO_DIR}" && env ${hook_env[@]+"${hook_env[@]}"} bash "${POST_DEPLOY_HOOK}") || hook_status=$?
     if [[ "${hook_status}" != 0 ]]; then
         echo "$(t m236 "Error: the post-deploy hook failed (exit code ${hook_status}). Files are synchronized, but the post-deploy step did not finish.")" >&2
         exit "${hook_status}"
