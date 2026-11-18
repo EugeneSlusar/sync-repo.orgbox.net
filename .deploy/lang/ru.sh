@@ -533,3 +533,10 @@ L_m268='  ✓ Ключи SSH-хоста получены от GitHub и закр
 L_m269='DEPLOY_KNOWN_HOSTS пуст: workflow деплоя не запустится, пока ключи SSH-хоста не закреплены. Запустите мастер снова (токену нужно право Actions: Read and write) или вставьте вывод ssh-keyscan.'
 # en:   ✗ DEPLOY_KNOWN_HOSTS — the SSH host keys were not obtained, so there is nothing to pin. Without it the deploy workflow will not start.
 L_m270='  ✗ DEPLOY_KNOWN_HOSTS — ключи SSH-хоста не получены, закреплять нечего. Без этого секрета workflow деплоя не запустится.'
+
+# en: Hook variables loaded from ${HOOK_ENV_FILE}: ${hook_env_names}
+L_m271='Переменные для хука загружены из ${HOOK_ENV_FILE}: ${hook_env_names}'
+# en: Line ${hook_line_no} of ${HOOK_ENV_FILE} skipped: use the form NAME=value.
+L_m272='Строка ${hook_line_no} файла ${HOOK_ENV_FILE} пропущена: используйте вид NAME=значение.'
+# en: Variable ${hook_name} in ${HOOK_ENV_FILE} is not allowed and was skipped.
+L_m273='Переменная ${hook_name} в ${HOOK_ENV_FILE} не разрешена и пропущена.'
