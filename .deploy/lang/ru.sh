@@ -529,7 +529,7 @@ L_m266='Не удалось удалить ${wf_path} из ${slug}: удалит
 L_m267='GitHub не вернул ключи SSH-хоста (проверьте, что Actions включены, а у токена есть право Actions: Read and write).'
 # en:   ✓ SSH host keys received from GitHub and pinned in DEPLOY_KNOWN_HOSTS.
 L_m268='  ✓ Ключи SSH-хоста получены от GitHub и закреплены в DEPLOY_KNOWN_HOSTS.'
-# en: DEPLOY_KNOWN_HOSTS is empty: the workflow will read the host keys on the GitHub runner at every deploy (checked on first contact, not pinned).
-L_m269='DEPLOY_KNOWN_HOSTS пуст: workflow будет читать ключи хоста на GitHub-раннере при каждом деплое (проверка при первом подключении, без закрепления).'
-# en:   • DEPLOY_KNOWN_HOSTS skipped: the workflow will read the host keys on the GitHub runner.
-L_m270='  • DEPLOY_KNOWN_HOSTS пропущен: workflow прочитает ключи хоста на GitHub-раннере.'
+# en: DEPLOY_KNOWN_HOSTS is empty: the deploy workflow will not start until the SSH host keys are pinned. Run the wizard again (the token needs Actions: Read and write) or paste the output of ssh-keyscan.
+L_m269='DEPLOY_KNOWN_HOSTS пуст: workflow деплоя не запустится, пока ключи SSH-хоста не закреплены. Запустите мастер снова (токену нужно право Actions: Read and write) или вставьте вывод ssh-keyscan.'
+# en:   ✗ DEPLOY_KNOWN_HOSTS — the SSH host keys were not obtained, so there is nothing to pin. Without it the deploy workflow will not start.
+L_m270='  ✗ DEPLOY_KNOWN_HOSTS — ключи SSH-хоста не получены, закреплять нечего. Без этого секрета workflow деплоя не запустится.'
