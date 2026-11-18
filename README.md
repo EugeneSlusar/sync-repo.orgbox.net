@@ -33,7 +33,8 @@ secrets, а в `main` ничего не коммитится (раньше ма�
 `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`) и коммитит `.github/workflows/deploy.yml`
 в рабочую ветку. Копировать значения вручную больше не нужно.
 Нужен только fine-grained токен GitHub на этот репозиторий с правами (все Read and write):
-Administration (добавляет Deploy Key), Contents, Secrets, Workflows; токен запрашивается один раз и нигде не сохраняется
+Actions (читает ключи SSH-хоста через GitHub), Administration (добавляет Deploy Key),
+Contents, Secrets, Workflows; токен запрашивается один раз и нигде не сохраняется
 (можно передать через `GH_TOKEN`). Если автонастройка не удалась или выбран ответ «n»,
 мастер показывает прежнюю инструкцию для ручной настройки.
 
@@ -229,7 +230,7 @@ python3 tests/test_sync_repo.py
   `~/.local/bin`, `~/bin` и временный каталог (часть каталогов бывает `noexec`), а при падении
   Go-рантайма включает `GOMAXPROCS=1` (лимит потоков на хостинге). Текст ошибки выводится на экран.
 - **Токен не принят.** Нужен fine-grained токен: Resource owner — владелец репозитория,
-  Repository access — этот репозиторий, права (все Read and write): Administration, Contents, Secrets, Workflows.
+  Repository access — этот репозиторий, права (все Read and write): Actions, Administration, Contents, Secrets, Workflows.
   Ответ GitHub показывается на экране; токен нигде не сохраняется.
 - **Deploy key** (ключ репозитория) нужен серверу для `git pull` и лучше read-only. Автодеплой
   «GitHub → хостинг» делает GitHub Actions по SSH с отдельным Actions-ключом (его создаёт мастер).
@@ -242,3 +243,21 @@ python3 tests/test_sync_repo.py
 Administration (Read and write). Без него скрипт предупредит, и ключ можно добавить вручную.
 При `--install` с адресом `git@github.com:...` ключ добавляется так же, если задан
 `SYNC_REPO_TOKEN` (или `GH_TOKEN`).
+
+## Ключи SSH-хоста (DEPLOY_KNOWN_HOSTS)
+
+На виртуальном хостинге сервер обычно не может подключиться сам к себе и не читает
+`/etc/ssh/*.pub`, поэтому отпечаток хоста нужно получить снаружи. Порядок источников:
+
+1. `SYNC_REPO_KNOWN_HOSTS` (вывод `ssh-keyscan`, заданный вручную) и сохранённая копия
+   `.deploy/sync_repo_known_hosts`;
+2. `ssh-keyscan` и `/etc/ssh/*.pub` на самом сервере;
+3. **GitHub-раннер:** мастер коммитит временный workflow `sync-repo-scan-host-key.yml`,
+   запускает его (токену нужно право Actions, Read and write), читает ключи из лога задачи,
+   записывает их в секрет `DEPLOY_KNOWN_HOSTS` и удаляет временный workflow;
+4. ручная вставка вывода `ssh-keyscan` с другого компьютера (необязательна).
+
+Если ключи так и не получены, секрет `DEPLOY_KNOWN_HOSTS` не создаётся, а workflow
+читает ключи хоста на раннере при каждом деплое (проверка при первом подключении, без
+закрепления); автонастройка при этом не считается проваленной. Если ключ хоста сменился,
+удалите `.deploy/sync_repo_known_hosts` и запустите мастер снова.
