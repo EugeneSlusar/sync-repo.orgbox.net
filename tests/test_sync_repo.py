@@ -888,7 +888,8 @@ exit 0
         self.assertNotIn("AAAAOLD", authorized)
 
     def test_empty_value_is_refused_and_not_claimed_configured(self):
-        project, result, log = self.wizard("y\nghp_secret_token\n\n", {"FAKE_KEYSCAN_EMPTY": "1"})
+        # пустая строка на запрос ручной вставки = пропустить
+        project, result, log = self.wizard("\ny\nghp_secret_token\n\n", {"FAKE_KEYSCAN_EMPTY": "1"})
         out = result.stdout + result.stderr
         self.assertIn("DEPLOY_KNOWN_HOSTS — пустое значение не записывается", out)
         self.assertNotIn("SECRET DEPLOY_KNOWN_HOSTS", log)
@@ -909,6 +910,38 @@ exit 0
         self.assertIn("repos/acme/site/keys", log)
         self.assertIn("read_only=true", log)
         self.assertIn("Deploy Key", out)
+
+    def test_known_hosts_can_be_pasted_and_is_remembered(self):
+        # сервер не видит собственные ключи: вставляем вывод ssh-keyscan с компьютера
+        project, result, log = self.wizard(
+            "srv.example ssh-ed25519 AAAAPASTED\n# комментарий\n\ny\nghp_secret_token\n\n",
+            {"FAKE_KEYSCAN_EMPTY": "1"})
+        out = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("SECRET DEPLOY_KNOWN_HOSTS <<srv.example ssh-ed25519 AAAAPASTED>>", log)
+        self.assertNotIn("комментарий", log)
+        cache = project / ".deploy/sync_repo_known_hosts"
+        self.assertIn("AAAAPASTED", cache.read_text())
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+        # кэш не попадает в Git проекта
+        self.assertNotIn("sync_repo_known_hosts", self.git(project, "status", "--porcelain"))
+
+    def test_saved_known_hosts_are_used_without_asking(self):
+        def prepare(project):
+            (project / ".deploy/sync_repo_known_hosts").write_text("srv.example ssh-ed25519 AAAASAVED\n")
+        project, result, log = self.wizard("y\nghp_secret_token\n\n", {"FAKE_KEYSCAN_EMPTY": "1"}, prepare)
+        out = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("AAAASAVED", log)
+        self.assertNotIn("ssh-keyscan -p", out)
+
+    def test_existing_known_hosts_secret_is_kept_when_nothing_found(self):
+        project, result, log = self.wizard("\ny\nghp_secret_token\n\n",
+                                          {"FAKE_KEYSCAN_EMPTY": "1", "FAKE_GH_EXISTING": "DEPLOY_KNOWN_HOSTS"})
+        out = result.stdout + result.stderr
+        self.assertIn("существующий секрет", out)
+        self.assertNotIn("SECRET DEPLOY_KNOWN_HOSTS", log)
+        self.assertNotIn("пустое значение не записывается", out)
 
     def test_fingerprint_falls_back_to_local_scan(self):
         project, result, log = self.wizard("y\nghp_secret_token\n\n", {"FAKE_KEYSCAN_LOCAL_ONLY": "1"})

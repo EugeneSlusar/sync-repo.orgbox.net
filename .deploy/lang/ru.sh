@@ -508,3 +508,13 @@ L_m256='Ветки в репозитории: ${remote_branches}'
 L_m257='Укажите нужную в BRANCH в ${CONFIG_FILE} и запустите скрипт снова.'
 # en: The repository has no branches: it is probably empty. Push the first commit to GitHub, then run the script again.
 L_m258='В репозитории нет веток: он, вероятно, пустой. Отправьте первый коммит в GitHub и запустите скрипт снова.'
+# en: SSH host keys taken from the saved copy: ${cache}
+L_m259='Ключи SSH-хоста взяты из сохранённой копии: ${cache}'
+# en: The server cannot read its own SSH host keys (typical for shared hosting).
+L_m260='Сервер не может прочитать собственные ключи SSH-хоста (обычное дело для виртуального хостинга).'
+# en: On YOUR computer run:  ssh-keyscan -p ${port} ${host}
+L_m261='На ВАШЕМ компьютере выполните:  ssh-keyscan -p ${port} ${host}'
+# en: Paste the whole output here, then an empty line (or just press Enter to skip):
+L_m262='Вставьте сюда весь вывод, затем пустую строку (или просто нажмите Enter, чтобы пропустить):'
+# en: DEPLOY_KNOWN_HOSTS: no new value found, the existing secret in ${slug} is kept.
+L_m263='  • DEPLOY_KNOWN_HOSTS: новое значение не найдено, существующий секрет в ${slug} оставлен без изменений.'
